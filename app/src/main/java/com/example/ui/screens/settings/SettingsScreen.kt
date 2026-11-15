@@ -32,6 +32,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,6 +81,7 @@ fun SettingsScreen(
     var showGithubToken by remember { mutableStateOf(false) }
     var githubRepo by remember(persisted.githubRepo) { mutableStateOf(persisted.githubRepo) }
     var githubBaseBranch by remember(persisted.githubBaseBranch) { mutableStateOf(persisted.githubBaseBranch) }
+    var autoPrOnRun by remember(persisted.autoCreateUpgradePrOnRun) { mutableStateOf(persisted.autoCreateUpgradePrOnRun) }
 
     var maxPagesText by remember(persisted.maxPagesPerRun) { mutableStateOf(persisted.maxPagesPerRun.toString()) }
     var crawlDepthText by remember(persisted.crawlDepth) { mutableStateOf(persisted.crawlDepth.toString()) }
@@ -98,6 +100,7 @@ fun SettingsScreen(
         githubToken = persisted.githubToken
         githubRepo = persisted.githubRepo
         githubBaseBranch = persisted.githubBaseBranch
+        autoPrOnRun = persisted.autoCreateUpgradePrOnRun
         maxPagesText = persisted.maxPagesPerRun.toString()
         crawlDepthText = persisted.crawlDepth.toString()
         dailyBudgetText = persisted.dailyTokenBudget.toString()
@@ -321,11 +324,11 @@ fun SettingsScreen(
             }
 
             // 3. GitHub Self-Update Card
-            SettingsSectionCard(title = "GitHub Self-Rewrite Loop") {
+            SettingsSectionCard(title = "GitHub Source Code & Self-Upgrade Loop") {
                 OutlinedTextField(
                     value = githubRepo,
                     onValueChange = { githubRepo = it },
-                    label = { Text("GitHub Repository (owner/repo)") },
+                    label = { Text("GitHub Repository (owner/repo or URL)") },
                     placeholder = { Text("e.g. yourname/agent-lab") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("settings_github_repo_input"),
@@ -340,7 +343,7 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = githubToken,
                     onValueChange = { githubToken = it },
-                    label = { Text("GitHub Personal Access Token (Encrypted)") },
+                    label = { Text("GitHub Personal Access Token (for PRs & CI)") },
                     singleLine = true,
                     visualTransformation = if (showGithubToken) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
@@ -353,6 +356,22 @@ fun SettingsScreen(
                     },
                     modifier = Modifier.fillMaxWidth().testTag("settings_github_token_input"),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Auto-open self-upgrade PR during /run or RUN",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = autoPrOnRun,
+                        onCheckedChange = { autoPrOnRun = it },
+                        modifier = Modifier.testTag("settings_auto_pr_switch"),
+                    )
+                }
             }
 
             // 4. Autonomous Limits & Budget Card
@@ -431,6 +450,7 @@ fun SettingsScreen(
                         tokensUsedToday = persisted.tokensUsedToday,
                         tokenBudgetDate = persisted.tokenBudgetDate,
                         autoApproveImprovements = persisted.autoApproveImprovements,
+                        autoCreateUpgradePrOnRun = autoPrOnRun,
                     )
                     viewModel.saveAll(updated)
                 },

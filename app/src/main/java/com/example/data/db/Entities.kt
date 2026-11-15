@@ -203,3 +203,16 @@ data class BrainTransitionEntity(
     val updatedAt: Long = System.currentTimeMillis(),
 )
 
+@Entity(tableName = "training_checkpoints")
+data class TrainingCheckpointEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val epoch: Int,
+    val loss: Float,
+    val perplexity: Float,
+    val vocabSize: Int,
+    val parameterCount: Int,
+    val tokensProcessed: Int,
+    val sourceLabel: String,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+

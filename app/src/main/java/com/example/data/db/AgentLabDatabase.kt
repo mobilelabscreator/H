@@ -18,8 +18,9 @@ import androidx.room.RoomDatabase
         ImprovementProposalEntity::class,
         GitHubPrEntity::class,
         BrainTransitionEntity::class,
+        TrainingCheckpointEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class AgentLabDatabase : RoomDatabase() {
@@ -32,6 +33,7 @@ abstract class AgentLabDatabase : RoomDatabase() {
     abstract fun improvementProposalDao(): ImprovementProposalDao
     abstract fun gitHubPrDao(): GitHubPrDao
     abstract fun brainDao(): BrainDao
+    abstract fun trainingDao(): TrainingDao
 
     companion object {
         fun build(context: Context): AgentLabDatabase =

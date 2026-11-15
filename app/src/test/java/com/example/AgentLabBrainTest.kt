@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.ai.AgentLabBrain
+import com.example.core.ai.TrainableNeuralNet
+import com.example.core.github.RepoWorkspaceManager
 import com.example.core.rag.VectorMath
 import com.example.data.db.AgentLabDatabase
 import com.example.data.db.KnowledgeEntryEntity
@@ -16,12 +18,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class AgentLabBrainTest {
 
     private lateinit var db: AgentLabDatabase
+    private lateinit var weightsFile: File
+    private lateinit var neuralNet: TrainableNeuralNet
     private lateinit var brain: AgentLabBrain
 
     @Before
@@ -30,19 +35,57 @@ class AgentLabBrainTest {
         db = Room.inMemoryDatabaseBuilder(context, AgentLabDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        brain = AgentLabBrain(db.brainDao())
+        weightsFile = File(context.cacheDir, "test_neural_weights_${System.nanoTime()}.bin")
+        neuralNet = TrainableNeuralNet(weightsFile)
+        brain = AgentLabBrain(db.brainDao(), db.trainingDao(), neuralNet)
     }
 
     @After
     fun tearDown() {
         db.close()
+        weightsFile.delete()
+    }
+
+    @Test
+    fun `trainNeuralNet decreases loss across backpropagation epochs and persists binary weights`() = runBlocking {
+        val trainingText = buildString {
+            repeat(6) {
+                appendLine("fun trainAgentModel(epoch: Int) { val loss = computeCrossEntropy(logits, target); backpropagate(loss) }")
+                appendLine("Agent Lab syncs GitHub repository code into local Termux workspace and optimizes neural weights.")
+            }
+        }
+
+        val epochs = brain.trainNeuralEpochs(
+            corpus = trainingText,
+            epochs = 4,
+            learningRate = 0.025f,
+            sourceLabel = "unit_test",
+        )
+
+        assertEquals(4, epochs.size)
+        val firstLoss = epochs.first().loss
+        val finalLoss = epochs.last().loss
+        assertTrue("Expected finalLoss ($finalLoss) < firstLoss ($firstLoss)", finalLoss < firstLoss)
+        assertTrue("Expected persisted binary checkpoint file", weightsFile.exists() && weightsFile.length() > 100L)
+
+        // Reload into a brand-new instance and verify weights + stats restored
+        val reloaded = TrainableNeuralNet(weightsFile)
+        val stats = reloaded.getStats()
+        assertEquals(4, stats.totalEpochs)
+        assertTrue(stats.parameterCount > 1000)
+        assertTrue(stats.vocabSize > 10)
+        assertEquals(finalLoss, stats.lastLoss, 0.0001f)
+
+        // Verify TrainingDao recorded checkpoints
+        val latestCp = db.trainingDao().getLatest()
+        assertEquals(4, latestCp?.epoch)
     }
 
     @Test
     fun `trainOnText persists token transitions into Room`() = runBlocking {
         val sample = "Kotlin Jetpack Compose builds reactive Android interfaces cleanly. " +
             "Jetpack Compose manages state using StateFlow and ViewModels."
-        brain.trainOnText(sample, weightBoost = 1.0f)
+        brain.trainOnText(sample, weightBoost = 1.0f, sourceLabel = "transition_test")
 
         val count = db.brainDao().getTransitionCount()
         assertTrue("Expected positive persisted neural transition count, got $count", count > 5)
@@ -108,5 +151,12 @@ class AgentLabBrainTest {
 
         assertTrue(reply.contains("Sources Referenced"))
         assertTrue(reply.contains("https://bellard.org/quickjs/"))
+    }
+
+    @Test
+    fun `normalizeRepoSlug handles full github urls and owner repo slugs`() {
+        assertEquals("octocat/hello-world", RepoWorkspaceManager.normalizeRepoSlug("https://github.com/octocat/hello-world.git"))
+        assertEquals("octocat/hello-world", RepoWorkspaceManager.normalizeRepoSlug("octocat/hello-world/"))
+        assertEquals(null, RepoWorkspaceManager.normalizeRepoSlug("invalid-slug"))
     }
 }

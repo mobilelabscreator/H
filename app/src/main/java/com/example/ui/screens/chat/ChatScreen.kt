@@ -6,6 +6,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -73,6 +76,7 @@ import com.example.data.db.ChatMessageEntity
 import com.example.data.db.ChatSessionEntity
 import com.example.data.db.SourceCitation
 import com.example.ui.components.MarkdownText
+import com.example.ui.theme.CodeFontFamily
 
 @Composable
 fun ChatScreen(
@@ -85,6 +89,9 @@ fun ChatScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
     val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val neuralStats by viewModel.neuralStats.collectAsStateWithLifecycle()
+    val workspaceSummary by viewModel.workspaceSummary.collectAsStateWithLifecycle()
+    val agentRunState by viewModel.agentRunState.collectAsStateWithLifecycle()
     var inputText by remember { mutableStateOf("") }
     var showHistoryMenu by remember { mutableStateOf(false) }
 
@@ -158,20 +165,28 @@ fun ChatScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Icon(
-                            imageVector = Icons.Filled.AutoAwesome,
+                            imageVector = Icons.Filled.Terminal,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                         )
                         Column {
                             Text(
-                                text = "Agent Lab Chat",
+                                text = "Agent Lab Shell",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
+                            val statsLabel = neuralStats?.let {
+                                "${it.parameterCount} params • ep ${it.totalEpochs} • loss ${"%.3f".format(it.lastLoss)}"
+                            } ?: "Neural Core ready"
+                            val repoLabel = workspaceSummary.repoSlug.ifBlank { "no repo" }
+                            val phaseLabel = if (agentRunState.isRunning) " • ${agentRunState.currentPhase}" else ""
                             Text(
-                                text = "Agent Lab Core • Standalone RAG AI",
+                                text = "$statsLabel • $repoLabel$phaseLabel",
                                 style = MaterialTheme.typography.bodySmall,
+                                fontFamily = CodeFontFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -333,54 +348,99 @@ fun ChatScreen(
                 }
             }
 
-            // Composer Bar
+            // Termux-style quick slash command bar + Composer Bar
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 tonalElevation = 2.dp,
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        placeholder = { Text("Ask Agent Lab anything (RAG-grounded)...") },
-                        maxLines = 5,
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .testTag("chat_input_field"),
-                        shape = RoundedCornerShape(16.dp),
-                    )
-                    if (uiState.isStreaming) {
-                        FilledIconButton(
-                            onClick = { viewModel.stopStreaming() },
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.error,
-                                contentColor = MaterialTheme.colorScheme.onError,
-                            ),
-                            modifier = Modifier
-                                .size(52.dp)
-                                .testTag("chat_stop_button"),
-                        ) {
-                            Icon(Icons.Filled.Stop, contentDescription = "Stop generating")
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val quickCmds = listOf(
+                            "/run" to true,
+                            "/train" to true,
+                            "/sync" to true,
+                            "/status" to true,
+                            "/ls" to true,
+                            "/repo " to false,
+                            "/upgrade " to false,
+                            "/grep " to false,
+                            "/help" to true,
+                        )
+                        quickCmds.forEach { (cmd, executeImmediately) ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                modifier = Modifier
+                                    .clickable {
+                                        if (executeImmediately && !uiState.isStreaming) {
+                                            viewModel.sendMessage(cmd)
+                                        } else {
+                                            inputText = cmd
+                                        }
+                                    }
+                                    .testTag("cmd_chip_${cmd.trim().removePrefix("/")}"),
+                            ) {
+                                Text(
+                                    text = cmd.trim(),
+                                    fontFamily = CodeFontFamily,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (cmd == "/run") MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                )
+                            }
                         }
-                    } else {
-                        FilledIconButton(
-                            onClick = {
-                                val text = inputText
-                                inputText = ""
-                                viewModel.sendMessage(text)
-                            },
-                            enabled = inputText.isNotBlank(),
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            placeholder = { Text("Prompt AI or run /run, /train, /repo owner/repo, /ls...") },
+                            maxLines = 5,
                             modifier = Modifier
-                                .size(52.dp)
-                                .testTag("chat_send_button"),
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send message")
+                                .weight(1f)
+                                .testTag("chat_input_field"),
+                            shape = RoundedCornerShape(16.dp),
+                        )
+                        if (uiState.isStreaming) {
+                            FilledIconButton(
+                                onClick = { viewModel.stopStreaming() },
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .testTag("chat_stop_button"),
+                            ) {
+                                Icon(Icons.Filled.Stop, contentDescription = "Stop generating")
+                            }
+                        } else {
+                            FilledIconButton(
+                                onClick = {
+                                    val text = inputText
+                                    inputText = ""
+                                    viewModel.sendMessage(text)
+                                },
+                                enabled = inputText.isNotBlank(),
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .testTag("chat_send_button"),
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send message")
+                            }
                         }
                     }
                 }
@@ -450,12 +510,12 @@ private fun ChatEmptyHero(onQuickPrompt: (String) -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    text = "Knowledge-Grounded AI Workspace",
+                    text = "Termux AI Environment & Neural Core",
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = "Every message retrieves relevant embeddings from your local Knowledge Base and cites exact source URLs.",
+                    text = "Train on web knowledge & your GitHub repo locally, run sandboxed QuickJS tools, and type /run to trigger autonomous research, training & self-upgrade PRs.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -464,13 +524,14 @@ private fun ChatEmptyHero(onQuickPrompt: (String) -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     listOf(
-                        "Summarize my latest Knowledge Base entries",
-                        "Write a Kotlin Compose card with animation",
-                        "What skills should we build next?",
+                        "/run",
+                        "/train",
+                        "/status",
+                        "/help",
                     ).forEach { prompt ->
                         AssistChip(
                             onClick = { onQuickPrompt(prompt) },
-                            label = { Text(prompt, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            label = { Text(prompt, fontFamily = CodeFontFamily, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         )
                     }
                 }

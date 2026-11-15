@@ -2,6 +2,8 @@ package com.example.core.agent
 
 import com.example.core.ai.AgentLabBrain
 import com.example.core.ai.LlmClient
+import com.example.core.github.GitHubSelfUpdater
+import com.example.core.github.RepoWorkspaceManager
 import com.example.core.skills.SkillFileManager
 import com.example.core.skills.SkillSandboxRunner
 import com.example.core.web.WebContentReader
@@ -63,6 +65,8 @@ class AutonomousAgentEngine(
     private val webSearchClient: WebSearchClient,
     private val llmClient: LlmClient,
     private val nativeBrain: AgentLabBrain,
+    private val workspaceManager: RepoWorkspaceManager,
+    private val gitHubSelfUpdater: GitHubSelfUpdater,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var activeJob: Job? = null
@@ -71,13 +75,13 @@ class AutonomousAgentEngine(
     private val _runState = MutableStateFlow(AgentRunState())
     val runState: StateFlow<AgentRunState> = _runState.asStateFlow()
 
-    fun startRun() {
+    fun startRun(upgradeGoal: String? = null) {
         if (activeJob?.isActive == true) return
         val runId = UUID.randomUUID().toString().take(8)
         activeJob = scope.launch {
             _runState.value = AgentRunState(isRunning = true, currentPhase = "RESEARCH", currentRunId = runId)
             try {
-                executeAutonomousLoop(runId)
+                executeAutonomousLoop(runId, upgradeGoal?.trim()?.takeIf { it.isNotBlank() })
             } catch (_: CancellationException) {
                 log(runId, "AGENT", "Run stopped by user.", "WARN")
             } catch (e: Exception) {
@@ -91,6 +95,52 @@ class AutonomousAgentEngine(
     fun stopRun() {
         activeJob?.cancel()
         activeJob = null
+    }
+
+    suspend fun trainNow(epochs: Int = 2): String {
+        val runId = "TRAIN"
+        val kbEntries = knowledgeRepository.getAll()
+        val repoFiles = workspaceManager.getAllWorkspaceFiles()
+        val corpus = buildString {
+            kbEntries.forEach { entry ->
+                appendLine(entry.title)
+                appendLine(entry.summary)
+                appendLine(entry.keyFacts)
+            }
+            repoFiles.entries.take(20).forEach { (path, content) ->
+                appendLine("// $path")
+                appendLine(content.take(1500))
+            }
+        }
+        if (corpus.isBlank()) {
+            val starter = "Agent Lab autonomous neural core learns from web sources, GitHub repositories, QuickJS skills, and Kotlin codebases."
+            val metrics = nativeBrain.trainNeuralEpochs(starter, epochs = epochs, sourceLabel = "bootstrap")
+            val last = metrics.lastOrNull()
+            val msg = if (last != null) {
+                "Bootstrap trained ${metrics.size} epoch(s): epoch=${last.epoch}, loss=${"%.4f".format(last.loss)}, ppl=${"%.2f".format(last.perplexity)}, params=${last.parameterCount}."
+            } else {
+                "No training data available yet."
+            }
+            log(runId, "TRAIN", msg, "INFO")
+            return msg
+        }
+
+        val metrics = nativeBrain.trainNeuralEpochs(
+            corpus = corpus,
+            epochs = epochs,
+            sourceLabel = "kb(${kbEntries.size})+repo(${repoFiles.size})",
+        )
+        val first = metrics.firstOrNull()
+        val last = metrics.lastOrNull()
+        val msg = if (first != null && last != null) {
+            "Trained ${metrics.size} epoch(s) on ${kbEntries.size} KB entries & ${repoFiles.size} repo files: " +
+                "loss ${"%.4f".format(first.loss)} -> ${"%.4f".format(last.loss)}, " +
+                "vocab=${last.vocabSize}, params=${last.parameterCount}."
+        } else {
+            "Corpus too small for neural epoch."
+        }
+        log(runId, "TRAIN", msg, "SUCCESS")
+        return msg
     }
 
     suspend fun ensureStarterEvalQuestionsSeeded() {
@@ -126,7 +176,7 @@ class AutonomousAgentEngine(
         log("MANUAL", "APPROVAL", "Rejected ${proposal.targetType}: ${proposal.targetName}", "WARN")
     }
 
-    private suspend fun executeAutonomousLoop(runId: String) {
+    private suspend fun executeAutonomousLoop(runId: String, upgradeGoal: String?) {
         val settings = settingsRepository.getSnapshot()
         if (settings.aiProvider.requiresApiKey && settings.apiKey.isBlank()) {
             log(runId, "AGENT", "Selected external provider requires an API key in Settings, or switch to Agent Lab Core (No Key).", "ERROR")
@@ -134,6 +184,20 @@ class AutonomousAgentEngine(
         }
 
         ensureStarterEvalQuestionsSeeded()
+
+        // -----------------------------------------------------------------
+        // 0. SYNC GITHUB SOURCE WORKSPACE (if configured)
+        // -----------------------------------------------------------------
+        if (settings.githubRepo.isNotBlank()) {
+            _runState.value = _runState.value.copy(currentPhase = "SYNC")
+            runCatching {
+                workspaceManager.syncRepositoryAndTrain { msg ->
+                    log(runId, "SYNC", msg, "INFO")
+                }
+            }.onFailure { err ->
+                log(runId, "SYNC", "GitHub workspace sync skipped: ${err.message}", "WARN")
+            }
+        }
 
         // -----------------------------------------------------------------
         // 1. RESEARCH
@@ -314,11 +378,19 @@ class AutonomousAgentEngine(
             }
         }
 
-        // Also reinforce native brain weights on existing knowledge base entries
+        // Reinforce neural weights with backpropagation epochs over KB + synced repo code
+        _runState.value = _runState.value.copy(currentPhase = "TRAIN")
         val kbEntries = knowledgeRepository.getAll()
         kbEntries.take(10).forEach { entry ->
-            nativeBrain.trainOnText("${entry.title} ${entry.summary} ${entry.keyFacts}", weightBoost = 0.4f)
+            nativeBrain.trainOnText(
+                text = "${entry.title} ${entry.summary} ${entry.keyFacts}",
+                weightBoost = 0.4f,
+                sourceLabel = entry.title,
+                neuralEpochs = 0,
+            )
         }
+        val trainReport = trainNow(epochs = 2)
+        log(runId, "TRAIN", trainReport, "SUCCESS")
 
         // -----------------------------------------------------------------
         // 3. EVALUATE
@@ -342,6 +414,33 @@ class AutonomousAgentEngine(
             proposeAndTestWithNativeBrain(runId, settings.systemPrompt, evalQuestions, weakest, baselineScore, autoApprove)
         } else {
             proposeAndTestWithExternalLlm(runId, settings.systemPrompt, evalQuestions, weakest, newlyLearnedSummaries, baselineScore, autoApprove)
+        }
+
+        // -----------------------------------------------------------------
+        // 7. GITHUB SELF-UPGRADE PR (if repo + token configured & enabled or goal specified)
+        // -----------------------------------------------------------------
+        val latestSettings = settingsRepository.getSnapshot()
+        val hasRepoAndToken = latestSettings.githubRepo.isNotBlank() && latestSettings.githubToken.isNotBlank()
+        if (hasRepoAndToken && (upgradeGoal != null || latestSettings.autoCreateUpgradePrOnRun)) {
+            currentCoroutineContext().ensureActive()
+            _runState.value = _runState.value.copy(currentPhase = "UPGRADE_PR")
+            val effectiveGoal = upgradeGoal ?: buildString {
+                val stats = nativeBrain.getNeuralStats()
+                val gapWords = weakest.flatMap { nativeBrain.extractKeywords(it.question.question, 2) }.distinct().take(4)
+                append("Autonomous neural & capability self-upgrade (epoch=${stats.totalEpochs}, loss=${"%.3f".format(stats.lastLoss)}, eval=${formatPct(baselineScore)})")
+                if (gapWords.isNotEmpty()) append(" targeting ${gapWords.joinToString(", ")}")
+            }
+            log(runId, "GITHUB", "Opening self-upgrade Pull Request for: $effectiveGoal")
+            runCatching {
+                val pr = gitHubSelfUpdater.proposeAndMonitorSelfImprovement(effectiveGoal) { phase, msg ->
+                    log(runId, phase, msg, if (msg.contains("SUCCEEDED")) "SUCCESS" else "INFO")
+                }
+                log(runId, "GITHUB", "Self-upgrade PR #${pr.prNumber} ready: ${pr.prUrl}", "SUCCESS")
+            }.onFailure { err ->
+                log(runId, "GITHUB", "Self-upgrade PR skipped/failed: ${err.message}", "WARN")
+            }
+        } else if (upgradeGoal != null) {
+            log(runId, "GITHUB", "Configure GitHub Repo and Token in Settings (or via /repo) to push self-upgrade PRs.", "WARN")
         }
 
         _runState.value = _runState.value.copy(currentPhase = "COMPLETE")

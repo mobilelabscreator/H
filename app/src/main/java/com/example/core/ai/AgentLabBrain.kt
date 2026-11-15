@@ -4,6 +4,8 @@ import com.example.core.rag.VectorMath
 import com.example.data.db.BrainDao
 import com.example.data.db.BrainTransitionEntity
 import com.example.data.db.KnowledgeEntryEntity
+import com.example.data.db.TrainingCheckpointEntity
+import com.example.data.db.TrainingDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -11,7 +13,6 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlin.math.ln
-import kotlin.math.sqrt
 
 data class NativeSummaryResult(
     val title: String,
@@ -23,58 +24,104 @@ data class NativeSummaryResult(
 )
 
 /**
- * Self-contained, original on-device AI engine ("Agent Lab Neural Core").
+ * Self-contained, trainable on-device AI engine ("Agent Lab Core").
  * Built from scratch in Kotlin with zero external API keys and zero dependency on Gemini:
- * - Trains persistent bigram/trigram transition weights in Room from every learned source & chat
- * - Summarizes web pages, GitHub repos, PDFs, and transcripts using TextRank graph centrality
- * - Extracts structured facts, code blocks, and evaluation Q&A pairs
+ * - Includes [TrainableNeuralNet]: pure-Kotlin backpropagation neural network with Adam optimizer,
+ *   dynamic token/code vocabulary, cross-entropy loss tracking, and persisted binary weight checkpoints
+ * - Maintains associative context weights in Room (`brain_transitions`)
+ * - Summarizes web pages, GitHub source repos, PDFs, and transcripts using TextRank graph centrality
  * - Synthesizes grounded, streaming Markdown replies with explicit source citations
  * - Evaluates answer accuracy using semantic cosine + F1 concept overlap
  */
 class AgentLabBrain(
     private val brainDao: BrainDao,
+    private val trainingDao: TrainingDao,
+    val neuralNet: TrainableNeuralNet,
 ) {
     val transitionCountFlow: Flow<Int> = brainDao.observeTransitionCount()
+    val checkpointsFlow: Flow<List<TrainingCheckpointEntity>> = trainingDao.observeRecent()
 
-    suspend fun trainOnText(text: String, weightBoost: Float = 1.0f) = withContext(Dispatchers.IO) {
+    suspend fun getNeuralStats(): NeuralModelStats = neuralNet.getStats()
+
+    suspend fun trainOnText(
+        text: String,
+        weightBoost: Float = 1.0f,
+        sourceLabel: String = "document",
+        neuralEpochs: Int = 1,
+    ) = withContext(Dispatchers.IO) {
         val tokens = tokenizeWords(text).take(1200)
-        if (tokens.size < 3) return@withContext
+        if (tokens.size >= 3) {
+            val counts = mutableMapOf<Pair<String, String>, Float>()
+            for (i in 0 until tokens.size - 1) {
+                val w1 = tokens[i]
+                val w2 = tokens[i + 1]
+                counts[w1 to w2] = (counts[w1 to w2] ?: 0f) + weightBoost
 
-        val counts = mutableMapOf<Pair<String, String>, Float>()
-        for (i in 0 until tokens.size - 1) {
-            val w1 = tokens[i]
-            val w2 = tokens[i + 1]
-            val key1 = w1
-            counts[key1 to w2] = (counts[key1 to w2] ?: 0f) + weightBoost
+                if (i + 2 < tokens.size) {
+                    val w3 = tokens[i + 2]
+                    val key2 = "$w1 $w2"
+                    counts[key2 to w3] = (counts[key2 to w3] ?: 0f) + (weightBoost * 1.5f)
+                }
+            }
 
-            if (i + 2 < tokens.size) {
-                val w3 = tokens[i + 2]
-                val key2 = "$w1 $w2"
-                counts[key2 to w3] = (counts[key2 to w3] ?: 0f) + (weightBoost * 1.5f)
+            val now = System.currentTimeMillis()
+            val batch = mutableListOf<BrainTransitionEntity>()
+            for ((pair, addWeight) in counts.entries.sortedByDescending { it.value }.take(250)) {
+                val existing = brainDao.findTransition(pair.first, pair.second)
+                if (existing != null) {
+                    batch.add(existing.copy(weight = existing.weight + addWeight, updatedAt = now))
+                } else {
+                    batch.add(
+                        BrainTransitionEntity(
+                            contextKey = pair.first,
+                            nextToken = pair.second,
+                            weight = addWeight,
+                            updatedAt = now,
+                        ),
+                    )
+                }
+            }
+            if (batch.isNotEmpty()) {
+                brainDao.upsertAll(batch)
             }
         }
 
-        val now = System.currentTimeMillis()
-        val batch = mutableListOf<BrainTransitionEntity>()
-        // Upsert top 250 strongest transitions per document to keep DB fast and compact
-        for ((pair, addWeight) in counts.entries.sortedByDescending { it.value }.take(250)) {
-            val existing = brainDao.findTransition(pair.first, pair.second)
-            if (existing != null) {
-                batch.add(existing.copy(weight = existing.weight + addWeight, updatedAt = now))
-            } else {
-                batch.add(
-                    BrainTransitionEntity(
-                        contextKey = pair.first,
-                        nextToken = pair.second,
-                        weight = addWeight,
-                        updatedAt = now,
+        if (neuralEpochs > 0 && text.trim().length >= 24) {
+            trainNeuralEpochs(
+                corpus = text,
+                epochs = neuralEpochs,
+                sourceLabel = sourceLabel,
+            )
+        }
+    }
+
+    suspend fun trainNeuralEpochs(
+        corpus: String,
+        epochs: Int = 2,
+        learningRate: Float = 0.015f,
+        sourceLabel: String = "corpus",
+        onEpoch: (suspend (TrainingEpochMetrics) -> Unit)? = null,
+    ): List<TrainingEpochMetrics> {
+        val epochResults = neuralNet.trainOnCorpus(
+            corpus = corpus,
+            epochs = epochs,
+            learningRate = learningRate,
+            onEpochDone = { metrics ->
+                trainingDao.insert(
+                    TrainingCheckpointEntity(
+                        epoch = metrics.epoch,
+                        loss = metrics.loss,
+                        perplexity = metrics.perplexity,
+                        vocabSize = metrics.vocabSize,
+                        parameterCount = metrics.parameterCount,
+                        tokensProcessed = metrics.tokensProcessed,
+                        sourceLabel = sourceLabel.take(64),
                     ),
                 )
-            }
-        }
-        if (batch.isNotEmpty()) {
-            brainDao.upsertAll(batch)
-        }
+                onEpoch?.invoke(metrics)
+            },
+        )
+        return epochResults
     }
 
     suspend fun summarizeAndExtract(
@@ -83,7 +130,7 @@ class AgentLabBrain(
         content: String,
         maxSummarySentences: Int = 3,
     ): NativeSummaryResult = withContext(Dispatchers.Default) {
-        trainOnText("$rawTitle\n$content", weightBoost = 1.0f)
+        trainOnText("$rawTitle\n$content", weightBoost = 1.0f, sourceLabel = rawTitle.ifBlank { url })
 
         val cleanLines = content.lines()
             .map { it.trim() }
@@ -139,8 +186,7 @@ class AgentLabBrain(
         temperature: Float,
         maxTokens: Int,
     ): Flow<StreamChunk> = flow {
-        // Learn from user's prompt as well
-        trainOnText(userPrompt, weightBoost = 0.6f)
+        trainOnText(userPrompt, weightBoost = 0.6f, sourceLabel = "chat_prompt", neuralEpochs = 0)
 
         val fullReply = generateReply(
             userPrompt = userPrompt,
@@ -151,15 +197,12 @@ class AgentLabBrain(
             maxTokens = maxTokens,
         )
 
-        // Stream in natural chunks for responsive real-time UI rendering
         val words = fullReply.split(Regex("(?<=\\s)"))
-        val buffer = StringBuilder()
         var step = 0
         for (token in words) {
-            buffer.append(token)
             emit(StreamChunk.Delta(token))
             step++
-            if (step % 3 == 0) delay(16L)
+            if (step % 3 == 0) delay(14L)
         }
         val approxTokens = ((userPrompt.length + fullReply.length) / 4).coerceAtLeast(1)
         emit(StreamChunk.Completed(fullReply, approxTokens))
@@ -176,40 +219,47 @@ class AgentLabBrain(
         val cleanPrompt = userPrompt.trim()
         val intent = detectIntent(cleanPrompt)
         val transitionCount = brainDao.getTransitionCount()
+        val stats = neuralNet.getStats()
 
         if (retrievedKnowledge.isEmpty()) {
-            val continuation = generateTrainedContinuation(cleanPrompt, temperature, maxWords = 28)
+            val neuralOut = neuralNet.generateContinuation(cleanPrompt, maxTokens = 26, temperature = temperature)
+            val transitionOut = generateTransitionContinuation(cleanPrompt, temperature, maxWords = 24)
+            val continuation = neuralOut.ifBlank { transitionOut }
+
             return@withContext buildString {
-                appendLine("### Agent Lab Native AI")
+                appendLine("### Agent Lab Core (${stats.parameterCount} params • epoch ${stats.totalEpochs})")
                 if (allKnowledgeCount == 0) {
-                    appendLine("My local Knowledge Base is currently empty, and my neural transition memory has **$transitionCount** learned patterns.")
+                    appendLine("Knowledge Base is empty; trained neural weights: **${stats.vocabSize}** vocab tokens, **$transitionCount** associative transitions.")
                     appendLine()
-                    appendLine("To teach me about **\"${cleanPrompt.take(80)}\"**:")
-                    appendLine("- Add a URL, GitHub repo, YouTube link, PDF, or Topic in the **Sources** tab and tap **Read Now**.")
-                    appendLine("- Or tap **RUN** in the **Agent** tab so I can autonomously search the web, extract facts, and train my weights.")
+                    appendLine("Quick Termux commands you can run right here:")
+                    appendLine("- `/repo owner/repo` — Connect your GitHub source code so I can train on it and self-upgrade")
+                    appendLine("- `/train` — Run backpropagation epochs on learned sources & repo files")
+                    appendLine("- `/run` — Launch the full autonomous Research -> Train -> Eval -> Upgrade loop")
+                    appendLine("- `/help` — View all shell & workspace commands")
                 } else {
-                    appendLine("I searched **$allKnowledgeCount** entries in my Knowledge Base, but none matched **\"${cleanPrompt.take(80)}\"** closely yet.")
+                    appendLine("Searched **$allKnowledgeCount** Knowledge Base entries; none closely matched **\"${cleanPrompt.take(80)}\"** yet.")
                     if (continuation.isNotBlank()) {
                         appendLine()
-                        appendLine("From my trained neural transition memory:")
+                        appendLine("**Neural Core Output** _(loss=${"%.3f".format(stats.lastLoss)}):_")
                         appendLine("> $continuation")
                     }
                     appendLine()
-                    appendLine("- Add a relevant Topic or URL in **Sources** and tap **Read Now** to expand my knowledge on this subject.")
+                    appendLine("- Run `/run` or add a Source URL / GitHub repo to expand grounded knowledge on this topic.")
                 }
             }.trim()
         }
 
-        // Rank individual sentences across retrieved knowledge entries against the prompt
         val queryVec = VectorMath.localSemanticEmbedding(cleanPrompt)
+        val queryNeuralVec = neuralNet.encodeTextEmbedding(cleanPrompt)
         val rankedEvidence = mutableListOf<Triple<String, KnowledgeEntryEntity, Float>>()
         for (entry in retrievedKnowledge) {
             val sentences = splitSentences("${entry.summary} ${entry.keyFacts}")
             for (s in sentences) {
                 if (s.length < 18) continue
                 val sem = VectorMath.cosineSimilarity(queryVec, VectorMath.localSemanticEmbedding(s))
+                val neuralSim = VectorMath.cosineSimilarity(queryNeuralVec, neuralNet.encodeTextEmbedding(s))
                 val lex = VectorMath.keywordOverlapScore(cleanPrompt, s)
-                val score = sem * 0.65f + lex * 0.35f
+                val score = sem * 0.50f + neuralSim * 0.20f + lex * 0.30f
                 rankedEvidence.add(Triple(s.trim(), entry, score))
             }
         }
@@ -220,14 +270,14 @@ class AgentLabBrain(
             IntentKind.CODE -> {
                 val primary = retrievedKnowledge.first()
                 sb.appendLine("### Implementation Synthesis (${primary.title})")
-                sb.appendLine("Based on **${retrievedKnowledge.size}** matched knowledge entries:")
+                sb.appendLine("Grounded in **${retrievedKnowledge.size}** knowledge entries & Neural Core (epoch ${stats.totalEpochs}, loss ${"%.3f".format(stats.lastLoss)}):")
                 sb.appendLine()
                 topEvidence.take(3).forEachIndexed { idx, (sent, entry, _) ->
                     sb.appendLine("- $sent _([${idx + 1}] ${entry.title})_")
                 }
                 sb.appendLine()
                 sb.appendLine("```kotlin")
-                sb.appendLine("// Generated by Agent Lab Native AI from local Knowledge Base")
+                sb.appendLine("// Generated by Agent Lab Core (Neural Epoch ${stats.totalEpochs})")
                 sb.appendLine("// Task: ${cleanPrompt.take(72)}")
                 sb.appendLine("data class AgentSynthesisResult(")
                 sb.appendLine("    val topic: String = \"${primary.title.replace("\"", "'")}\",")
@@ -261,10 +311,16 @@ class AgentLabBrain(
                         sb.appendLine("- $sent [${refIndex.coerceAtLeast(1)}]")
                     }
                 }
-                val continuation = generateTrainedContinuation(cleanPrompt, temperature, maxWords = 20)
-                if (continuation.isNotBlank()) {
+                val neuralContinuation = neuralNet.generateContinuation(cleanPrompt, maxTokens = 20, temperature = temperature)
+                if (neuralContinuation.isNotBlank()) {
                     sb.appendLine()
-                    sb.appendLine("**Trained Association:** $continuation")
+                    sb.appendLine("**Neural Synthesis** _(epoch ${stats.totalEpochs}, loss=${"%.3f".format(stats.lastLoss)}):_ $neuralContinuation")
+                } else {
+                    val transContinuation = generateTransitionContinuation(cleanPrompt, temperature, maxWords = 18)
+                    if (transContinuation.isNotBlank()) {
+                        sb.appendLine()
+                        sb.appendLine("**Trained Association:** $transContinuation")
+                    }
                 }
             }
         }
@@ -280,10 +336,6 @@ class AgentLabBrain(
         return@withContext sb.toString().trim().take(maxChars)
     }
 
-    /**
-     * Quantitative accuracy scoring (0.0 .. 1.0) without calling any external LLM.
-     * Combines semantic vector cosine similarity and F1 concept token overlap.
-     */
     fun evaluateAccuracy(
         expectedAnswer: String,
         candidateAnswer: String,
@@ -307,7 +359,7 @@ class AgentLabBrain(
         return (sem * 0.6f + f1 * 0.4f).coerceIn(0f, 1f)
     }
 
-    private suspend fun generateTrainedContinuation(
+    private suspend fun generateTransitionContinuation(
         seedText: String,
         temperature: Float,
         maxWords: Int,
@@ -368,7 +420,6 @@ class AgentLabBrain(
             }
         }
 
-        // 8 power iterations of TextRank
         val damping = 0.85
         repeat(8) {
             val next = DoubleArray(n) { 1.0 - damping }

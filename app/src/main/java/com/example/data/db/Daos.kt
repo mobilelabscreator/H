@@ -233,3 +233,18 @@ interface BrainDao {
     suspend fun clearAll()
 }
 
+@Dao
+interface TrainingDao {
+    @Query("SELECT * FROM training_checkpoints ORDER BY id DESC LIMIT 40")
+    fun observeRecent(): Flow<List<TrainingCheckpointEntity>>
+
+    @Query("SELECT * FROM training_checkpoints ORDER BY id DESC LIMIT 1")
+    suspend fun getLatest(): TrainingCheckpointEntity?
+
+    @Insert
+    suspend fun insert(checkpoint: TrainingCheckpointEntity): Long
+
+    @Query("DELETE FROM training_checkpoints")
+    suspend fun clearAll()
+}
+

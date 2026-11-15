@@ -2,6 +2,7 @@ package com.example.ui.screens.agent
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -24,10 +26,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ModelTraining
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,11 +60,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.core.ai.NeuralModelStats
+import com.example.core.github.WorkspaceSummary
 import com.example.data.db.AgentLogEntity
 import com.example.data.db.EvalQuestionEntity
 import com.example.data.db.GitHubPrEntity
 import com.example.data.db.ImprovementProposalEntity
 import com.example.data.db.ProposalStatus
+import com.example.data.db.TrainingCheckpointEntity
 import com.example.ui.components.DiffViewer
 import com.example.ui.theme.CodeFontFamily
 import java.text.SimpleDateFormat
@@ -82,9 +89,19 @@ fun AgentScreen(
     val isGitHubRunning by viewModel.isGitHubRunning.collectAsStateWithLifecycle()
     val githubError by viewModel.githubError.collectAsStateWithLifecycle()
     val brainTransitions by viewModel.brainTransitions.collectAsStateWithLifecycle()
+    val neuralStats by viewModel.neuralStats.collectAsStateWithLifecycle()
+    val checkpoints by viewModel.checkpoints.collectAsStateWithLifecycle()
+    val workspaceSummary by viewModel.workspaceSummary.collectAsStateWithLifecycle()
+    val isTraining by viewModel.isTraining.collectAsStateWithLifecycle()
 
     var selectedSubTab by remember { mutableIntStateOf(0) }
-    val subTabs = listOf("Activity Log", "Improvements (${proposals.size})", "Eval Set (${evalQuestions.size})", "GitHub PRs")
+    val subTabs = listOf(
+        "Activity Log",
+        "Neural Core (${checkpoints.size})",
+        "Improvements (${proposals.size})",
+        "Eval Set (${evalQuestions.size})",
+        "GitHub PRs",
+    )
 
     Column(
         modifier = modifier
@@ -122,8 +139,9 @@ fun AgentScreen(
                                 color = if (runState.isRunning) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                text = "Trained Weights: $brainTransitions",
+                                text = "Params: ${neuralStats?.parameterCount ?: 0} • Ep ${neuralStats?.totalEpochs ?: 0} • W:$brainTransitions",
                                 style = MaterialTheme.typography.labelSmall,
+                                fontFamily = CodeFontFamily,
                                 color = MaterialTheme.colorScheme.tertiary,
                                 modifier = Modifier.testTag("agent_brain_weights"),
                             )
@@ -139,7 +157,20 @@ fun AgentScreen(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.trainNow() },
+                            enabled = !isTraining && !runState.isRunning,
+                            modifier = Modifier.testTag("agent_train_button"),
+                        ) {
+                            if (isTraining) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.ModelTraining, contentDescription = null)
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text("TRAIN")
+                        }
                         Button(
                             onClick = { viewModel.startAgent() },
                             enabled = !runState.isRunning,
@@ -188,9 +219,11 @@ fun AgentScreen(
             }
         }
 
-        // Sub-tab selector
+        // Sub-tab selector (scrollable for smaller handheld widths)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             subTabs.forEachIndexed { index, title ->
@@ -209,23 +242,33 @@ fun AgentScreen(
                 onClear = { viewModel.clearLogs() },
                 modifier = Modifier.weight(1f),
             )
-            1 -> ImprovementsPane(
+            1 -> NeuralTrainingPane(
+                stats = neuralStats,
+                checkpoints = checkpoints,
+                workspace = workspaceSummary,
+                isTraining = isTraining,
+                onTrainNow = { viewModel.trainNow() },
+                modifier = Modifier.weight(1f),
+            )
+            2 -> ImprovementsPane(
                 proposals = proposals,
                 onApprove = { viewModel.approveProposal(it) },
                 onReject = { viewModel.rejectProposal(it) },
                 modifier = Modifier.weight(1f),
             )
-            2 -> EvalQuestionsPane(
+            3 -> EvalQuestionsPane(
                 questions = evalQuestions,
                 onAdd = { q, a -> viewModel.addEvalQuestion(q, a) },
                 onUpdate = { item, q, a -> viewModel.updateEvalQuestion(item, q, a) },
                 onDelete = { viewModel.deleteEvalQuestion(it) },
                 modifier = Modifier.weight(1f),
             )
-            3 -> GitHubSelfRewritePane(
+            4 -> GitHubSelfRewritePane(
                 prs = githubPrs,
+                workspace = workspaceSummary,
                 isRunning = isGitHubRunning,
                 errorMessage = githubError,
+                onSyncRepo = { viewModel.syncRepoNow() },
                 onTriggerPr = { viewModel.triggerSelfRewritePr(it) },
                 onRefreshPr = { viewModel.refreshPr(it) },
                 onDismissError = { viewModel.dismissGitHubError() },
@@ -552,10 +595,115 @@ private fun EvalEditDialog(
 }
 
 @Composable
+private fun NeuralTrainingPane(
+    stats: NeuralModelStats?,
+    checkpoints: List<TrainingCheckpointEntity>,
+    workspace: WorkspaceSummary,
+    isTraining: Boolean,
+    onTrainNow: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    Column(modifier = modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Trainable Neural Core (Backprop + Adam)", style = MaterialTheme.typography.titleMedium)
+                    Button(
+                        onClick = onTrainNow,
+                        enabled = !isTraining,
+                        modifier = Modifier.testTag("train_2_epochs_button"),
+                    ) {
+                        Text(if (isTraining) "Training..." else "Train 2 Epochs")
+                    }
+                }
+                Text(
+                    text = if (stats != null) {
+                        "Params: ${stats.parameterCount}  •  Vocab: ${stats.vocabSize}  •  Epochs: ${stats.totalEpochs}  •  Steps: ${stats.totalSteps}\n" +
+                            "Last Loss: ${"%.4f".format(stats.lastLoss)}  •  Best Loss: ${"%.4f".format(stats.bestLoss)}  •  PPL: ${"%.2f".format(stats.lastPerplexity)}\n" +
+                            "Synced GitHub Repo: ${workspace.repoSlug.ifBlank { "none" }} (${workspace.syncedFiles} files, ${workspace.totalLines} lines)"
+                    } else {
+                        "Initializing neural network tensors..."
+                    },
+                    fontFamily = CodeFontFamily,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        if (checkpoints.isEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = "No backpropagation checkpoints recorded yet. Tap TRAIN, run /train, or sync a GitHub repo to train weights.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(bottom = 20.dp),
+            ) {
+                items(checkpoints, key = { it.id }) { cp ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Epoch #${cp.epoch} • ${cp.sourceLabel}",
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                Text(
+                                    text = "loss=${"%.4f".format(cp.loss)}  ppl=${"%.2f".format(cp.perplexity)}  vocab=${cp.vocabSize}  tokens=${cp.tokensProcessed}",
+                                    fontFamily = CodeFontFamily,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                )
+                            }
+                            Text(
+                                text = fmt.format(Date(cp.timestamp)),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun GitHubSelfRewritePane(
     prs: List<GitHubPrEntity>,
+    workspace: WorkspaceSummary,
     isRunning: Boolean,
     errorMessage: String?,
+    onSyncRepo: () -> Unit,
     onTriggerPr: (String) -> Unit,
     onRefreshPr: (GitHubPrEntity) -> Unit,
     onDismissError: () -> Unit,
@@ -578,32 +726,47 @@ private fun GitHubSelfRewritePane(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Text(
-                    text = "Creates a feature branch, commits LLM-authored Kotlin/Compose changes, opens a Pull Request, monitors GitHub Actions APK builds, and auto-fixes failed builds up to 3 attempts.",
+                    text = if (workspace.repoSlug.isNotBlank()) {
+                        "Workspace: ${workspace.repoSlug} (${workspace.syncedFiles} files, ${workspace.totalLines} lines). Pulls code, trains Neural Core, opens feature-branch PRs, and monitors GitHub Actions APK builds."
+                    } else {
+                        "Set owner/repo in Settings or run `/repo owner/repo` in Chat so the AI can clone, train on its codebase, and open self-upgrade PRs."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
                     value = taskInput,
                     onValueChange = { taskInput = it },
-                    label = { Text("Describe app feature or fix to build via PR") },
+                    label = { Text("Describe app feature or code upgrade via PR") },
                     minLines = 2,
                     modifier = Modifier.fillMaxWidth().testTag("github_task_input"),
                 )
-                Button(
-                    onClick = {
-                        onTriggerPr(taskInput)
-                        taskInput = ""
-                    },
-                    enabled = taskInput.isNotBlank() && !isRunning,
-                    modifier = Modifier.testTag("trigger_github_pr_button"),
-                ) {
-                    if (isRunning) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Filled.RocketLaunch, contentDescription = null, modifier = Modifier.size(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onSyncRepo,
+                        enabled = !isRunning,
+                        modifier = Modifier.testTag("sync_github_repo_button"),
+                    ) {
+                        Icon(Icons.Filled.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Sync & Train")
                     }
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isRunning) "Building & Monitoring PR..." else "Create Branch & Open PR")
+                    Button(
+                        onClick = {
+                            onTriggerPr(taskInput)
+                            taskInput = ""
+                        },
+                        enabled = taskInput.isNotBlank() && !isRunning,
+                        modifier = Modifier.testTag("trigger_github_pr_button"),
+                    ) {
+                        if (isRunning) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Filled.RocketLaunch, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isRunning) "Building PR..." else "Open Upgrade PR")
+                    }
                 }
             }
         }

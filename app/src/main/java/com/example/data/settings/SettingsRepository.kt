@@ -69,6 +69,7 @@ data class AgentSettings(
     val tokensUsedToday: Int = 0,
     val tokenBudgetDate: String = LocalDate.now().toString(),
     val autoApproveImprovements: Boolean = false,
+    val autoCreateUpgradePrOnRun: Boolean = true,
 ) {
     val effectiveBaseUrl: String
         get() = baseUrl.trim().ifBlank { aiProvider.defaultBaseUrl }.trimEnd('/')
@@ -110,6 +111,7 @@ class SettingsRepository(
         val TOKENS_USED_TODAY = intPreferencesKey("tokens_used_today")
         val TOKEN_BUDGET_DATE = stringPreferencesKey("token_budget_date")
         val AUTO_APPROVE_IMPROVEMENTS = booleanPreferencesKey("auto_approve_improvements")
+        val AUTO_PR_ON_RUN = booleanPreferencesKey("auto_pr_on_run")
     }
 
     val settingsFlow: Flow<AgentSettings> = context.settingsDataStore.data.map { prefs ->
@@ -143,6 +145,7 @@ class SettingsRepository(
             tokensUsedToday = usedToday,
             tokenBudgetDate = today,
             autoApproveImprovements = prefs[Keys.AUTO_APPROVE_IMPROVEMENTS] ?: false,
+            autoCreateUpgradePrOnRun = prefs[Keys.AUTO_PR_ON_RUN] ?: true,
         )
     }
 
@@ -170,6 +173,7 @@ class SettingsRepository(
             prefs[Keys.TOKENS_USED_TODAY] = updated.tokensUsedToday.coerceAtLeast(0)
             prefs[Keys.TOKEN_BUDGET_DATE] = LocalDate.now().toString()
             prefs[Keys.AUTO_APPROVE_IMPROVEMENTS] = updated.autoApproveImprovements
+            prefs[Keys.AUTO_PR_ON_RUN] = updated.autoCreateUpgradePrOnRun
         }
     }
 
@@ -200,6 +204,18 @@ class SettingsRepository(
     suspend fun setAutoApproveImprovements(enabled: Boolean) {
         context.settingsDataStore.edit { prefs ->
             prefs[Keys.AUTO_APPROVE_IMPROVEMENTS] = enabled
+        }
+    }
+
+    suspend fun setAutoCreateUpgradePrOnRun(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[Keys.AUTO_PR_ON_RUN] = enabled
+        }
+    }
+
+    suspend fun updateGitHubRepo(repoSlug: String) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[Keys.GITHUB_REPO] = repoSlug.trim()
         }
     }
 }

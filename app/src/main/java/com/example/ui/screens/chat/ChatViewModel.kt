@@ -4,9 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.AgentLabContainer
+import com.example.core.agent.AgentRunState
+import com.example.core.agent.AutonomousAgentEngine
+import com.example.core.ai.AgentLabBrain
 import com.example.core.ai.ChatTurn
 import com.example.core.ai.LlmClient
+import com.example.core.ai.NeuralModelStats
 import com.example.core.ai.StreamChunk
+import com.example.core.github.RepoWorkspaceManager
+import com.example.core.github.WorkspaceSummary
+import com.example.core.terminal.AgentTerminalProcessor
+import com.example.core.terminal.TerminalCommandResult
 import com.example.data.db.ChatDao
 import com.example.data.db.ChatMessageEntity
 import com.example.data.db.ChatSessionEntity
@@ -38,12 +46,22 @@ class ChatViewModel(
     private val knowledgeRepository: KnowledgeRepository,
     private val llmClient: LlmClient,
     private val settingsRepository: SettingsRepository,
+    private val terminalProcessor: AgentTerminalProcessor,
+    private val nativeBrain: AgentLabBrain,
+    private val workspaceManager: RepoWorkspaceManager,
+    private val agentEngine: AutonomousAgentEngine,
 ) : ViewModel() {
 
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    private val _neuralStats = MutableStateFlow<NeuralModelStats?>(null)
+    val neuralStats: StateFlow<NeuralModelStats?> = _neuralStats.asStateFlow()
+
+    val workspaceSummary: StateFlow<WorkspaceSummary> = workspaceManager.summary
+    val agentRunState: StateFlow<AgentRunState> = agentEngine.runState
 
     val sessions: StateFlow<List<ChatSessionEntity>> = chatDao.observeSessions()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -66,6 +84,8 @@ class ChatViewModel(
             } else {
                 createNewSession()
             }
+            workspaceManager.refreshLocalSummary()
+            _neuralStats.value = nativeBrain.getNeuralStats()
         }
     }
 
@@ -129,6 +149,42 @@ class ChatViewModel(
                 ),
             )
             chatDao.touchSession(sessionId)
+
+            // Execute Termux-style slash commands directly (/run, /train, /repo, /sync, /upgrade, /ls, /cat, /grep, /skill, /status, /help, /clear)
+            if (prompt.startsWith("/")) {
+                _uiState.value = _uiState.value.copy(
+                    isStreaming = true,
+                    streamingText = "Executing `$prompt`...",
+                    streamingCitations = emptyList(),
+                    errorMessage = null,
+                )
+                val cmdResult = runCatching { terminalProcessor.executeIfCommand(prompt) }
+                    .getOrElse { err -> TerminalCommandResult.Output("Command error: `${err.message}`") }
+                when (cmdResult) {
+                    is TerminalCommandResult.ClearChat -> {
+                        chatDao.clearSessionMessages(sessionId)
+                        chatDao.updateSessionTitle(sessionId, "New Session")
+                    }
+                    is TerminalCommandResult.Output -> {
+                        chatDao.insertMessage(
+                            ChatMessageEntity(
+                                sessionId = sessionId,
+                                role = "assistant",
+                                content = cmdResult.markdown,
+                            ),
+                        )
+                        chatDao.touchSession(sessionId)
+                    }
+                    TerminalCommandResult.NotACommand -> Unit
+                }
+                _neuralStats.value = nativeBrain.getNeuralStats()
+                _uiState.value = _uiState.value.copy(
+                    isStreaming = false,
+                    streamingText = "",
+                    streamingCitations = emptyList(),
+                )
+                return@launch
+            }
 
             // Retrieve relevant knowledge via RAG embeddings
             val retrieved = knowledgeRepository.retrieveRelevant(prompt, topK = 5, minScore = 0.08f)
@@ -199,6 +255,7 @@ class ChatViewModel(
                             )
                             chatDao.touchSession(sessionId)
                         }
+                        _neuralStats.value = nativeBrain.getNeuralStats()
                         _uiState.value = _uiState.value.copy(
                             isStreaming = false,
                             streamingText = "",
@@ -270,6 +327,10 @@ class ChatViewModel(
                         knowledgeRepository = container.knowledgeRepository,
                         llmClient = container.llmClient,
                         settingsRepository = container.settingsRepository,
+                        terminalProcessor = container.terminalProcessor,
+                        nativeBrain = container.agentLabBrain,
+                        workspaceManager = container.repoWorkspaceManager,
+                        agentEngine = container.autonomousAgentEngine,
                     ) as T
             }
     }
