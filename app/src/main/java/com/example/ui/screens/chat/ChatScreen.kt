@@ -1,10 +1,10 @@
 package com.example.ui.screens.chat
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.core.net.toUri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
@@ -46,6 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,6 +86,7 @@ fun ChatScreen(
     isWideScreen: Boolean,
     needsApiKey: Boolean,
     onNavigateToSettings: () -> Unit,
+    onExploreInternet: (String?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -190,7 +193,16 @@ fun ChatScreen(
                             )
                         }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        FilledTonalButton(
+                            onClick = { onExploreInternet(null) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("chat_explore_internet_button"),
+                        ) {
+                            Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Explore Internet", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         if (!isWideScreen) {
                             Box {
                                 IconButton(
@@ -320,6 +332,7 @@ fun ChatScreen(
                             viewModel.sendMessage(prompt)
                             inputText = ""
                         },
+                        onExploreInternet = { onExploreInternet(null) },
                     )
                 }
             } else {
@@ -362,6 +375,7 @@ fun ChatScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         val quickCmds = listOf(
+                            "/explore " to false,
                             "/run" to true,
                             "/train" to true,
                             "/sync" to true,
@@ -490,7 +504,10 @@ private fun SessionSidebarItem(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ChatEmptyHero(onQuickPrompt: (String) -> Unit) {
+private fun ChatEmptyHero(
+    onQuickPrompt: (String) -> Unit,
+    onExploreInternet: () -> Unit,
+) {
     Card(
         modifier = Modifier.widthIn(max = 560.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -515,7 +532,7 @@ private fun ChatEmptyHero(onQuickPrompt: (String) -> Unit) {
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = "Train on web knowledge & your GitHub repo locally, run sandboxed QuickJS tools, and type /run to trigger autonomous research, training & self-upgrade PRs.",
+                    text = "Browse any site or Google Chrome link, train on web knowledge & your GitHub repo locally, and run /run to optimize & self-upgrade.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -523,6 +540,11 @@ private fun ChatEmptyHero(onQuickPrompt: (String) -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    AssistChip(
+                        onClick = onExploreInternet,
+                        leadingIcon = { Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text("Explore Internet") },
+                    )
                     listOf(
                         "/run",
                         "/train",
@@ -600,7 +622,7 @@ private fun ChatMessageBubble(
                                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                                     modifier = Modifier.clickable(enabled = cite.sourceUrl.startsWith("http")) {
                                         runCatching {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(cite.sourceUrl)))
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, cite.sourceUrl.toUri()))
                                         }
                                     },
                                 ) {

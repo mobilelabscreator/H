@@ -11,6 +11,7 @@ import com.example.core.security.EncryptedSecretStore
 import com.example.core.skills.SkillFileManager
 import com.example.core.skills.SkillSandboxRunner
 import com.example.core.terminal.AgentTerminalProcessor
+import com.example.core.web.InternetExplorerEngine
 import com.example.core.web.WebContentReader
 import com.example.core.web.WebSearchClient
 import com.example.data.db.AgentLabDatabase
@@ -80,12 +81,24 @@ class AgentLabContainer(context: Context) {
         workspaceManager = repoWorkspaceManager,
         gitHubSelfUpdater = gitHubSelfUpdater,
     )
+    val internetExplorerEngine: InternetExplorerEngine = InternetExplorerEngine(
+        settingsRepository = settingsRepository,
+        webContentReader = webContentReader,
+        webSearchClient = webSearchClient,
+        knowledgeRepository = knowledgeRepository,
+        sourceDao = database.sourceDao(),
+        evalDao = database.evalDao(),
+        agentLogDao = database.agentLogDao(),
+        nativeBrain = agentLabBrain,
+        llmClient = llmClient,
+    )
     val terminalProcessor: AgentTerminalProcessor = AgentTerminalProcessor(
         settingsRepository = settingsRepository,
         nativeBrain = agentLabBrain,
         workspaceManager = repoWorkspaceManager,
         agentEngine = autonomousAgentEngine,
         gitHubSelfUpdater = gitHubSelfUpdater,
+        internetExplorerEngine = internetExplorerEngine,
         skillDao = database.skillDao(),
         skillSandboxRunner = skillSandboxRunner,
         knowledgeDao = database.knowledgeDao(),

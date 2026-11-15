@@ -5,6 +5,7 @@ import com.example.core.ai.AgentLabBrain
 import com.example.core.github.GitHubSelfUpdater
 import com.example.core.github.RepoWorkspaceManager
 import com.example.core.skills.SkillSandboxRunner
+import com.example.core.web.InternetExplorerEngine
 import com.example.data.db.AgentLogDao
 import com.example.data.db.AgentLogEntity
 import com.example.data.db.KnowledgeDao
@@ -28,6 +29,7 @@ class AgentTerminalProcessor(
     private val workspaceManager: RepoWorkspaceManager,
     private val agentEngine: AutonomousAgentEngine,
     private val gitHubSelfUpdater: GitHubSelfUpdater,
+    private val internetExplorerEngine: InternetExplorerEngine,
     private val skillDao: SkillDao,
     private val skillSandboxRunner: SkillSandboxRunner,
     private val knowledgeDao: KnowledgeDao,
@@ -194,6 +196,18 @@ class AgentTerminalProcessor(
                     }.trim(),
                 )
             }
+            "/explore" -> {
+                internetExplorerEngine.startAutonomousExplore(arg.ifBlank { null }, maxPages = 5)
+                val targetLabel = arg.ifBlank { "curiosity topics & enabled sources" }
+                TerminalCommandResult.Output(
+                    buildString {
+                        appendLine("### Exploring Internet: $targetLabel")
+                        appendLine("The AI is now browsing live pages, following outbound links, extracting facts into Knowledge Base, and training its Neural Core.")
+                        appendLine()
+                        appendLine("Tap **Explore Internet** in the header to watch the live Chrome-powered WebView or open pages in Google Chrome.")
+                    }.trim(),
+                )
+            }
             else -> TerminalCommandResult.Output("Unknown command `$cmd`. Type `/help` to list all terminal commands.")
         }
     }
@@ -224,6 +238,7 @@ class AgentTerminalProcessor(
 
     private fun helpText(): String = """
         ### Agent Lab Terminal Commands
+        - `/explore [url|topic]` — Browse any URL or topic, follow links, and train the Neural Core
         - `/run [goal]` — Run the full autonomous cycle (Sync Repo -> Research -> Train -> Eval -> Improve -> Self-Upgrade PR)
         - `/train [epochs]` — Run real backpropagation epochs on Knowledge Base & synced repo code
         - `/repo <owner/repo>` — Attach & clone a GitHub source repo into the AI's workspace and train on it

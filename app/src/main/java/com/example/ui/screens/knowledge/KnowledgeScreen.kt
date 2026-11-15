@@ -1,8 +1,8 @@
 package com.example.ui.screens.knowledge
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.clickable
+import androidx.core.net.toUri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -244,7 +244,7 @@ private fun KnowledgeEntryCard(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier.clickable(enabled = entry.sourceUrl.startsWith("http")) {
                                 runCatching {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(entry.sourceUrl)))
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, entry.sourceUrl.toUri()))
                                 }
                             },
                         ) {

@@ -241,6 +241,7 @@ class WebContentReader(
             if (!resp.isSuccessful) {
                 throw IllegalStateException("HTTP ${resp.code} fetching $url")
             }
+            val resolvedUrl = resp.request.url.toString().ifBlank { originalUrl }
             val contentType = resp.header("Content-Type")?.lowercase().orEmpty()
             val body = resp.body ?: throw IllegalStateException("Empty body from $url")
 
@@ -297,7 +298,7 @@ class WebContentReader(
                 .take(35_000)
 
             return WebDocument(
-                url = originalUrl,
+                url = resolvedUrl,
                 title = title,
                 contentType = "text/html",
                 textContent = cleaned,
@@ -328,12 +329,42 @@ class WebContentReader(
             .take(15)
             .toList()
 
-    private fun normalizeUrl(raw: String): String {
-        val trimmed = raw.trim()
-        return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            trimmed
-        } else {
-            "https://$trimmed"
+    companion object {
+        private val URL_IN_TEXT_REGEX = Regex("""https?://[^\s\)\]>"]+""")
+        private val DOMAIN_LIKE_REGEX = Regex("""^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/.*)?$""")
+
+        /**
+         * Extracts the first embedded http(s) URL from shared Chrome text (e.g. "Title - https://..."),
+         * or normalizes a bare domain like `en.wikipedia.org/wiki/Kotlin`.
+         */
+        fun extractFirstUrlOrNull(raw: String): String? {
+            val trimmed = raw.trim()
+            if (trimmed.isBlank()) return null
+            val embedded = URL_IN_TEXT_REGEX.find(trimmed)?.value?.trimEnd('.', ',', ';', ')', ']')
+            if (!embedded.isNullOrBlank()) return embedded
+            val firstToken = trimmed.split(Regex("\\s+")).firstOrNull().orEmpty()
+            if (DOMAIN_LIKE_REGEX.matches(firstToken)) return "https://$firstToken"
+            return null
+        }
+
+        fun looksLikeUrl(raw: String): Boolean {
+            val trimmed = raw.trim()
+            return trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) ||
+                (!trimmed.contains(' ') && DOMAIN_LIKE_REGEX.matches(trimmed))
+        }
+
+        fun normalizeUrl(raw: String): String {
+            val trimmed = raw.trim().replace(" ", "%20")
+            val embedded = extractFirstUrlOrNull(trimmed)
+            if (embedded != null && !trimmed.startsWith("http://", true) && !trimmed.startsWith("https://", true)) {
+                return embedded
+            }
+            return when {
+                trimmed.startsWith("https://", ignoreCase = true) -> "https://" + trimmed.substring(8)
+                trimmed.startsWith("http://", ignoreCase = true) -> "http://" + trimmed.substring(7)
+                else -> "https://$trimmed"
+            }
         }
     }
 }

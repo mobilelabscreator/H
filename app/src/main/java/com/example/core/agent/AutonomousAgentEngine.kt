@@ -195,6 +195,7 @@ class AutonomousAgentEngine(
                     log(runId, "SYNC", msg, "INFO")
                 }
             }.onFailure { err ->
+                if (err is CancellationException) throw err
                 log(runId, "SYNC", "GitHub workspace sync skipped: ${err.message}", "WARN")
             }
         }
@@ -389,8 +390,29 @@ class AutonomousAgentEngine(
                 neuralEpochs = 0,
             )
         }
-        val trainReport = trainNow(epochs = 2)
+        val trainReport = trainNow(epochs = nativeBrain.neuralNet.getTrainingProfile().defaultEpochs)
         log(runId, "TRAIN", trainReport, "SUCCESS")
+
+        // Real self-optimization pass: benchmark candidate learning rates & residual scales with rollback safety
+        val repoFiles = workspaceManager.getAllWorkspaceFiles()
+        val optCorpus = buildString {
+            kbEntries.take(12).forEach { appendLine("${it.title}\n${it.summary}\n${it.keyFacts}") }
+            repoFiles.entries.take(6).forEach { (_, c) -> appendLine(c.take(1000)) }
+        }
+        if (optCorpus.length >= 64) {
+            val optResult = nativeBrain.optimizeSelfModel(optCorpus)
+            log(
+                runId,
+                "OPTIMIZE",
+                optResult.summary,
+                if (optResult.improved) "SUCCESS" else "INFO",
+            )
+            if (optResult.improved) {
+                workspaceManager.optimizeLocalNeuralSource(optResult.winningProfile)?.let { path ->
+                    log(runId, "OPTIMIZE", "Updated local source workspace copy: $path", "SUCCESS")
+                }
+            }
+        }
 
         // -----------------------------------------------------------------
         // 3. EVALUATE

@@ -4,11 +4,18 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.ai.AgentLabBrain
+import com.example.core.ai.LlmClient
 import com.example.core.ai.TrainableNeuralNet
 import com.example.core.github.RepoWorkspaceManager
 import com.example.core.rag.VectorMath
+import com.example.core.security.EncryptedSecretStore
+import com.example.core.web.InternetExplorerEngine
+import com.example.core.web.WebContentReader
+import com.example.core.web.WebSearchClient
 import com.example.data.db.AgentLabDatabase
 import com.example.data.db.KnowledgeEntryEntity
+import com.example.data.repository.KnowledgeRepository
+import com.example.data.settings.SettingsRepository
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -158,5 +165,76 @@ class AgentLabBrainTest {
         assertEquals("octocat/hello-world", RepoWorkspaceManager.normalizeRepoSlug("https://github.com/octocat/hello-world.git"))
         assertEquals("octocat/hello-world", RepoWorkspaceManager.normalizeRepoSlug("octocat/hello-world/"))
         assertEquals(null, RepoWorkspaceManager.normalizeRepoSlug("invalid-slug"))
+    }
+
+    @Test
+    fun `optimizeSelfModel strictly improves validation loss and persists optimized profile`() = runBlocking {
+        val corpus = buildString {
+            repeat(5) {
+                appendLine("fun optimizeModel(lr: Float) { val loss = forward(tokens); backprop(lr, loss) }")
+                appendLine("Agent Lab benchmarks candidate learning rates and retains strictly lower cross-entropy loss.")
+            }
+        }
+        val opt = brain.optimizeSelfModel(corpus)
+        assertTrue("Expected optimization to reduce loss: ${opt.summary}", opt.improved && opt.optimizedLoss < opt.baselineLoss)
+
+        val reloaded = TrainableNeuralNet(weightsFile)
+        val reloadedProfile = reloaded.getTrainingProfile()
+        assertEquals(opt.winningProfile.learningRate, reloadedProfile.learningRate, 0.0001f)
+        assertEquals(opt.winningProfile.residualScale, reloadedProfile.residualScale, 0.0001f)
+    }
+
+    @Test
+    fun `webContentReader extracts urls from Chrome shared text and bare domains`() {
+        assertEquals(
+            "https://developer.android.com/compose",
+            WebContentReader.extractFirstUrlOrNull("Jetpack Compose Docs - https://developer.android.com/compose."),
+        )
+        assertEquals(
+            "https://en.wikipedia.org/wiki/Kotlin",
+            WebContentReader.normalizeUrl("en.wikipedia.org/wiki/Kotlin"),
+        )
+        assertTrue(WebContentReader.looksLikeUrl("github.com/google/guava"))
+        assertTrue(!WebContentReader.looksLikeUrl("how do neural networks work"))
+    }
+
+    @Test
+    fun `internetExplorerEngine learns from rendered WebView DOM and saves KB and Source`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val settingsRepo = SettingsRepository(context, EncryptedSecretStore())
+        val llm = LlmClient(settingsRepo, brain, db.knowledgeDao())
+        val kbRepo = KnowledgeRepository(db.knowledgeDao(), llm)
+        val reader = WebContentReader(llm.httpClient, settingsRepo)
+        val search = WebSearchClient(llm.httpClient, settingsRepo)
+        val explorer = InternetExplorerEngine(
+            settingsRepository = settingsRepo,
+            webContentReader = reader,
+            webSearchClient = search,
+            knowledgeRepository = kbRepo,
+            sourceDao = db.sourceDao(),
+            evalDao = db.evalDao(),
+            agentLogDao = db.agentLogDao(),
+            nativeBrain = brain,
+            llmClient = llm,
+        )
+
+        val domText = """
+            Kotlin Multiplatform shares business logic across Android, iOS, web, and server targets.
+            Jetpack Compose renders declarative user interfaces natively using state flows and coroutines.
+            Developers inspect network requests and extract structured facts cleanly into vector knowledge bases.
+            Autonomous agents crawl outbound documentation links to stay current with new frameworks.
+        """.trimIndent()
+
+        val learnedTitle = explorer.learnFromWebViewDom(
+            url = "https://kotlinlang.org/docs/multiplatform.html",
+            title = "Kotlin Multiplatform Documentation",
+            domText = domText,
+            outboundLinks = listOf("https://kotlinlang.org/docs/home.html"),
+        )
+
+        assertTrue(learnedTitle.contains("Kotlin"))
+        assertTrue(db.knowledgeDao().getAll().any { it.sourceUrl.contains("kotlinlang.org") })
+        assertTrue(db.sourceDao().getAll().any { it.value.contains("kotlinlang.org") })
+        assertTrue(explorer.state.value.knowledgeLearned >= 1)
     }
 }

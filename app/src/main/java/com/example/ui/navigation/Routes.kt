@@ -1,5 +1,6 @@
 package com.example.ui.navigation
 
+import androidx.annotation.StringRes
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChatBubble
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.example.R
 import kotlinx.serialization.Serializable
 
 sealed interface AppRoute {
@@ -27,7 +29,7 @@ sealed interface AppRoute {
 
 data class TopLevelDestination(
     val route: AppRoute,
-    val label: String,
+    @param:StringRes val labelRes: Int,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
     val testTag: String,
@@ -36,42 +38,42 @@ data class TopLevelDestination(
 val TopLevelDestinations = listOf(
     TopLevelDestination(
         route = AppRoute.Chat,
-        label = "Chat",
+        labelRes = R.string.tab_chat,
         selectedIcon = Icons.Filled.ChatBubble,
         unselectedIcon = Icons.Outlined.ChatBubbleOutline,
         testTag = "nav_chat",
     ),
     TopLevelDestination(
         route = AppRoute.Sources,
-        label = "Sources",
+        labelRes = R.string.tab_sources,
         selectedIcon = Icons.Filled.Language,
         unselectedIcon = Icons.Outlined.Language,
         testTag = "nav_sources",
     ),
     TopLevelDestination(
         route = AppRoute.Knowledge,
-        label = "Knowledge",
+        labelRes = R.string.tab_knowledge,
         selectedIcon = Icons.Filled.Psychology,
         unselectedIcon = Icons.Outlined.Psychology,
         testTag = "nav_knowledge",
     ),
     TopLevelDestination(
         route = AppRoute.Skills,
-        label = "Skills",
+        labelRes = R.string.tab_skills,
         selectedIcon = Icons.Filled.Code,
         unselectedIcon = Icons.Outlined.Code,
         testTag = "nav_skills",
     ),
     TopLevelDestination(
         route = AppRoute.Agent,
-        label = "Agent",
+        labelRes = R.string.tab_agent,
         selectedIcon = Icons.Filled.AutoAwesome,
         unselectedIcon = Icons.Outlined.AutoAwesome,
         testTag = "nav_agent",
     ),
     TopLevelDestination(
         route = AppRoute.Settings,
-        label = "Settings",
+        labelRes = R.string.tab_settings,
         selectedIcon = Icons.Filled.Settings,
         unselectedIcon = Icons.Outlined.Settings,
         testTag = "nav_settings",

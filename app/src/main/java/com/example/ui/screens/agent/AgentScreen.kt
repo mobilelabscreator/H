@@ -1,10 +1,12 @@
 package com.example.ui.screens.agent
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.horizontalScroll
+import androidx.core.net.toUri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.ModelTraining
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -38,6 +41,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,10 +78,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AgentScreen(
     viewModel: AgentViewModel,
     isWideScreen: Boolean,
+    onExploreInternet: (String?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val runState by viewModel.runState.collectAsStateWithLifecycle()
@@ -119,12 +125,11 @@ fun AgentScreen(
                 modifier = Modifier.padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column {
                         Text(
                             text = "Autonomous Agent",
                             style = MaterialTheme.typography.headlineMedium,
@@ -157,20 +162,10 @@ fun AgentScreen(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(
-                            onClick = { viewModel.trainNow() },
-                            enabled = !isTraining && !runState.isRunning,
-                            modifier = Modifier.testTag("agent_train_button"),
-                        ) {
-                            if (isTraining) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(Icons.Filled.ModelTraining, contentDescription = null)
-                            }
-                            Spacer(Modifier.width(4.dp))
-                            Text("TRAIN")
-                        }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         Button(
                             onClick = { viewModel.startAgent() },
                             enabled = !runState.isRunning,
@@ -195,6 +190,27 @@ fun AgentScreen(
                             Icon(Icons.Filled.Stop, contentDescription = null)
                             Spacer(Modifier.width(4.dp))
                             Text("STOP")
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.trainNow() },
+                            enabled = !isTraining && !runState.isRunning,
+                            modifier = Modifier.testTag("agent_train_button"),
+                        ) {
+                            if (isTraining) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Filled.ModelTraining, contentDescription = null)
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text("TRAIN")
+                        }
+                        FilledTonalButton(
+                            onClick = { onExploreInternet(null) },
+                            modifier = Modifier.testTag("agent_explore_internet_button"),
+                        ) {
+                            Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Explore Internet")
                         }
                     }
                 }
@@ -841,7 +857,7 @@ private fun GitHubSelfRewritePane(
                                 OutlinedButton(
                                     onClick = {
                                         runCatching {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(pr.prUrl)))
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, pr.prUrl.toUri()))
                                         }
                                     },
                                 ) {
@@ -855,7 +871,7 @@ private fun GitHubSelfRewritePane(
                                 Button(
                                     onClick = {
                                         runCatching {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl)))
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, downloadUrl.toUri()))
                                         }
                                     },
                                 ) {

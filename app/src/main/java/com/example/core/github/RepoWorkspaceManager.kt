@@ -3,6 +3,7 @@ package com.example.core.github
 import android.content.Context
 import android.util.Base64
 import com.example.core.ai.AgentLabBrain
+import com.example.core.ai.NeuralTrainingProfile
 import com.example.data.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -231,6 +232,34 @@ class RepoWorkspaceManager(
             map[rel] = runCatching { f.readText() }.getOrDefault("")
         }
         map
+    }
+
+    /**
+     * Applies winning neural hyperparameters to the local workspace copy of TrainableNeuralNet.kt
+     * if a GitHub repository has been synced locally.
+     */
+    suspend fun optimizeLocalNeuralSource(profile: NeuralTrainingProfile): String? = withContext(Dispatchers.IO) {
+        val activeDir = activeWorkspaceDir()
+        if (!activeDir.exists()) return@withContext null
+        val target = activeDir.walkTopDown()
+            .firstOrNull { it.isFile && it.name == "TrainableNeuralNet.kt" }
+            ?: return@withContext null
+        val original = runCatching { target.readText() }.getOrNull() ?: return@withContext null
+        val updated = original
+            .replace(
+                Regex("""val learningRate: Float = [0-9.]+f"""),
+                "val learningRate: Float = ${"%.3f".format(profile.learningRate)}f",
+            )
+            .replace(
+                Regex("""val residualScale: Float = [0-9.]+f"""),
+                "val residualScale: Float = ${"%.2f".format(profile.residualScale)}f",
+            )
+        if (updated != original) {
+            target.writeText(updated)
+            target.relativeTo(activeDir).path
+        } else {
+            null
+        }
     }
 
     private suspend fun activeWorkspaceDir(): File {

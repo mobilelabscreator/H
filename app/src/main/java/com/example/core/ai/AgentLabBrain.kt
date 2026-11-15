@@ -95,17 +95,21 @@ class AgentLabBrain(
         }
     }
 
+    suspend fun optimizeSelfModel(corpus: String): NeuralOptimizationResult =
+        neuralNet.optimizeProfileOnCorpus(corpus)
+
     suspend fun trainNeuralEpochs(
         corpus: String,
-        epochs: Int = 2,
-        learningRate: Float = 0.015f,
+        epochs: Int? = null,
+        learningRate: Float? = null,
         sourceLabel: String = "corpus",
         onEpoch: (suspend (TrainingEpochMetrics) -> Unit)? = null,
     ): List<TrainingEpochMetrics> {
+        val profile = neuralNet.getTrainingProfile()
         val epochResults = neuralNet.trainOnCorpus(
             corpus = corpus,
-            epochs = epochs,
-            learningRate = learningRate,
+            epochs = epochs ?: profile.defaultEpochs,
+            learningRate = learningRate ?: profile.learningRate,
             onEpochDone = { metrics ->
                 trainingDao.insert(
                     TrainingCheckpointEntity(

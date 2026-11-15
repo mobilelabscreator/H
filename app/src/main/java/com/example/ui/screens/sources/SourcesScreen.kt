@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
@@ -27,6 +28,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -61,6 +63,7 @@ import java.util.Locale
 fun SourcesScreen(
     viewModel: SourcesViewModel,
     isWideScreen: Boolean,
+    onExploreInternet: (String?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val sources by viewModel.sources.collectAsStateWithLifecycle()
@@ -87,16 +90,33 @@ fun SourcesScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = "Research Sources",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = "Paste any webpage, GitHub repo, docs link, YouTube video, or PDF. Also add topics and search queries for the autonomous loop.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Research Sources",
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Paste any link, GitHub repo, docs, or topic — or browse & learn live sites via Chrome.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.size(8.dp))
+                FilledTonalButton(
+                    onClick = { onExploreInternet(quickUrl.trim().ifBlank { null }) },
+                    modifier = Modifier.testTag("sources_explore_internet_button"),
+                ) {
+                    Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(4.dp))
+                    Text("Explore Internet")
+                }
+            }
 
             // Quick paste link bar
             Row(
@@ -193,6 +213,7 @@ fun SourcesScreen(
                             isReading = source.id in uiState.activeReadingIds,
                             onToggle = { enabled -> viewModel.toggleEnabled(source, enabled) },
                             onReadNow = { viewModel.readSourceNow(source) },
+                            onExplore = { onExploreInternet(source.value) },
                             onEdit = { editingSource = source },
                             onDelete = { viewModel.deleteSource(source) },
                         )
@@ -229,6 +250,7 @@ private fun SourceCard(
     isReading: Boolean,
     onToggle: (Boolean) -> Unit,
     onReadNow: () -> Unit,
+    onExplore: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -336,19 +358,27 @@ private fun SourceCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedButton(
-                    onClick = onReadNow,
-                    enabled = !isReading,
-                    modifier = Modifier.testTag("read_source_now_${source.id}"),
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (isReading) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.size(6.dp))
-                        Text("Reading...")
-                    } else {
-                        Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.size(6.dp))
-                        Text("Read Now")
+                    OutlinedButton(
+                        onClick = onReadNow,
+                        enabled = !isReading,
+                        modifier = Modifier.testTag("read_source_now_${source.id}"),
+                    ) {
+                        if (isReading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.size(6.dp))
+                            Text("Reading...")
+                        } else {
+                            Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.size(6.dp))
+                            Text("Read Now")
+                        }
+                    }
+                    IconButton(onClick = onExplore, modifier = Modifier.testTag("explore_source_${source.id}")) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open in Web Explorer")
                     }
                 }
                 Row {

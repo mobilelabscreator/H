@@ -39,6 +39,22 @@ data class TrainingEpochMetrics(
     val tokensProcessed: Int,
 )
 
+data class NeuralTrainingProfile(
+    val learningRate: Float = 0.015f,
+    val defaultEpochs: Int = 2,
+    val ragTopK: Int = 3,
+    val residualScale: Float = 0.25f,
+)
+
+data class NeuralOptimizationResult(
+    val baselineLoss: Float,
+    val optimizedLoss: Float,
+    val previousProfile: NeuralTrainingProfile,
+    val winningProfile: NeuralTrainingProfile,
+    val improved: Boolean,
+    val summary: String,
+)
+
 /**
  * Real, trainable on-device neural language model written in pure Kotlin.
  *
@@ -58,7 +74,8 @@ class TrainableNeuralNet(
     private val weightsFile: File,
 ) {
     companion object {
-        private const val MAGIC = 0x41474E31 // "AGN1"
+        private const val MAGIC_V1 = 0x41474E31 // "AGN1"
+        private const val MAGIC_V2 = 0x41474E32 // "AGN2"
         private const val D_MODEL = 48
         private const val HIDDEN_DIM = 64
         private const val CONTEXT_WINDOW = 6
@@ -106,6 +123,7 @@ class TrainableNeuralNet(
     private var trainedTokens: Long = 0L
     private var lastLoss: Float = 0f
     private var bestLoss: Float = Float.MAX_VALUE
+    private var activeProfile: NeuralTrainingProfile = NeuralTrainingProfile()
     private var initialized: Boolean = false
 
     suspend fun ensureInitialized() {
@@ -125,14 +143,131 @@ class TrainableNeuralNet(
         }
     }
 
+    suspend fun getTrainingProfile(): NeuralTrainingProfile {
+        ensureInitialized()
+        return mutex.withLock { activeProfile }
+    }
+
+    suspend fun updateTrainingProfile(profile: NeuralTrainingProfile) {
+        ensureInitialized()
+        mutex.withLock {
+            activeProfile = profile.copy(
+                learningRate = profile.learningRate.coerceIn(0.002f, 0.06f),
+                defaultEpochs = profile.defaultEpochs.coerceIn(1, 6),
+                ragTopK = profile.ragTopK.coerceIn(2, 8),
+                residualScale = profile.residualScale.coerceIn(0.05f, 0.6f),
+            )
+            saveToDiskLocked()
+        }
+    }
+
+    /**
+     * Non-mutating validation pass returning average cross-entropy loss across [corpus].
+     */
+    suspend fun evaluateLoss(
+        corpus: String,
+        maxTokens: Int = 300,
+    ): Float = withContext(Dispatchers.Default) {
+        ensureInitialized()
+        val rawTokens = tokenize(corpus)
+        if (rawTokens.size < 4) return@withContext 0f
+        mutex.withLock {
+            val ids = rawTokens.take(maxTokens).map { tokenToId[it] ?: 1 }
+            evaluateLossLocked(ids, activeProfile.residualScale)
+        }
+    }
+
+    /**
+     * Benchmarks candidate learning rates & residual skip-connection scales on [corpus]
+     * using real weight rollback snapshots, keeping ONLY a configuration & weight state that
+     * strictly lowers cross-entropy validation loss.
+     */
+    suspend fun optimizeProfileOnCorpus(
+        corpus: String,
+        maxTokens: Int = 320,
+    ): NeuralOptimizationResult = withContext(Dispatchers.Default) {
+        ensureInitialized()
+        val rawTokens = tokenize(corpus)
+        if (rawTokens.size < 8) {
+            val prof = getTrainingProfile()
+            return@withContext NeuralOptimizationResult(
+                baselineLoss = 0f,
+                optimizedLoss = 0f,
+                previousProfile = prof,
+                winningProfile = prof,
+                improved = false,
+                summary = "Corpus too small (<8 tokens) for neural optimization trial.",
+            )
+        }
+
+        mutex.withLock {
+            val prevProfile = activeProfile
+            val ids = encodeAndGrowVocabLocked(rawTokens).take(maxTokens)
+            val baselineLoss = evaluateLossLocked(ids, prevProfile.residualScale)
+
+            val candidateRates = listOf(0.008f, 0.015f, 0.022f, 0.030f)
+            val candidateResiduals = listOf(0.15f, 0.25f, 0.35f)
+
+            val snapshot = captureSnapshotLocked()
+            var bestEvalLoss = baselineLoss
+            var bestCandidate = prevProfile
+            var bestSnapshot: WeightSnapshot? = null
+
+            for (lr in candidateRates) {
+                for (resScale in candidateResiduals) {
+                    restoreSnapshotLocked(snapshot)
+                    val trialProfile = prevProfile.copy(
+                        learningRate = lr,
+                        residualScale = resScale,
+                    )
+                    // Run 1 measured optimization step across ids with trial profile
+                    runSingleEpochLocked(ids, lr, resScale, mutateCounters = false)
+                    val lossAfter = evaluateLossLocked(ids, resScale)
+                    if (lossAfter.isFinite() && lossAfter < bestEvalLoss) {
+                        bestEvalLoss = lossAfter
+                        bestCandidate = trialProfile
+                        bestSnapshot = captureSnapshotLocked()
+                    }
+                }
+            }
+
+            if (bestSnapshot != null && bestEvalLoss < baselineLoss - 1e-4f) {
+                restoreSnapshotLocked(bestSnapshot)
+                activeProfile = bestCandidate
+                lastLoss = bestEvalLoss
+                if (bestEvalLoss < bestLoss) bestLoss = bestEvalLoss
+                saveToDiskLocked()
+                NeuralOptimizationResult(
+                    baselineLoss = baselineLoss,
+                    optimizedLoss = bestEvalLoss,
+                    previousProfile = prevProfile,
+                    winningProfile = bestCandidate,
+                    improved = true,
+                    summary = "Neural self-optimization lowered loss ${"%.4f".format(baselineLoss)} -> ${"%.4f".format(bestEvalLoss)} " +
+                        "(lr=${"%.3f".format(bestCandidate.learningRate)}, residual=${"%.2f".format(bestCandidate.residualScale)}).",
+                )
+            } else {
+                restoreSnapshotLocked(snapshot)
+                NeuralOptimizationResult(
+                    baselineLoss = baselineLoss,
+                    optimizedLoss = baselineLoss,
+                    previousProfile = prevProfile,
+                    winningProfile = prevProfile,
+                    improved = false,
+                    summary = "Baseline profile retained (lr=${"%.3f".format(prevProfile.learningRate)}, loss=${"%.4f".format(baselineLoss)}).",
+                )
+            }
+        }
+    }
+
     /**
      * Tokenizes [corpus] into subword/word/code tokens, expands vocabulary if space remains,
      * and runs [epochs] full backpropagation passes with Adam optimization.
      */
     suspend fun trainOnCorpus(
         corpus: String,
-        epochs: Int = 2,
-        learningRate: Float = 0.015f,
+        epochs: Int = activeProfile.defaultEpochs,
+        learningRate: Float = activeProfile.learningRate,
         maxTokensPerEpoch: Int = 900,
         onEpochDone: (suspend (TrainingEpochMetrics) -> Unit)? = null,
     ): List<TrainingEpochMetrics> = withContext(Dispatchers.Default) {
@@ -148,178 +283,11 @@ class TrainableNeuralNet(
             val metrics = mutex.withLock {
                 val ids = encodeAndGrowVocabLocked(rawTokens).take(maxTokensPerEpoch)
                 if (ids.size < 4) return@withLock null
-
-                var epochLossSum = 0.0
-                var samples = 0
-
-                val logits = FloatArray(idToToken.size)
-                val probs = FloatArray(idToToken.size)
-                val ctxVec = FloatArray(D_MODEL)
-                val hPre = FloatArray(HIDDEN_DIM)
-                val hAct = FloatArray(HIDDEN_DIM)
-                val dHidden = FloatArray(HIDDEN_DIM)
-                val dCtx = FloatArray(D_MODEL)
-
-                for (pos in 1 until ids.size) {
-                    val targetId = ids[pos]
-                    val start = max(0, pos - CONTEXT_WINDOW)
-                    val ctxLen = pos - start
-                    val vocabNow = idToToken.size
-
-                    // 1. Forward: weighted positional context sum over embeddings
-                    ctxVec.fill(0f)
-                    var weightNorm = 0f
-                    for (k in 0 until ctxLen) {
-                        val tokId = ids[start + k]
-                        val slot = CONTEXT_WINDOW - ctxLen + k
-                        val pW = max(0.05f, posWeights[slot])
-                        weightNorm += pW
-                        val embRow = wEmb[tokId]
-                        for (d in 0 until D_MODEL) {
-                            ctxVec[d] += embRow[d] * pW
-                        }
-                    }
-                    val invNorm = 1f / max(1e-4f, weightNorm)
-                    for (d in 0 until D_MODEL) ctxVec[d] *= invNorm
-
-                    // Hidden layer: hPre = ctxVec * W1 + b1, LeakyReLU + residual on first D_MODEL dims
-                    for (j in 0 until HIDDEN_DIM) {
-                        var sum = b1[j]
-                        for (d in 0 until D_MODEL) {
-                            sum += ctxVec[d] * w1[d][j]
-                        }
-                        if (j < D_MODEL) sum += ctxVec[j] * 0.25f
-                        hPre[j] = sum
-                        hAct[j] = if (sum >= 0f) sum else 0.05f * sum
-                    }
-
-                    // Output logits: hAct * W2 + b2
-                    var maxLogit = Float.NEGATIVE_INFINITY
-                    for (v in 0 until vocabNow) {
-                        var sum = b2[v]
-                        for (j in 0 until HIDDEN_DIM) {
-                            sum += hAct[j] * w2[j][v]
-                        }
-                        logits[v] = sum
-                        if (sum > maxLogit) maxLogit = sum
-                    }
-
-                    // Softmax + Cross-Entropy loss
-                    var expSum = 0.0
-                    for (v in 0 until vocabNow) {
-                        val e = exp((logits[v] - maxLogit).coerceIn(-20f, 0f).toDouble())
-                        probs[v] = e.toFloat()
-                        expSum += e
-                    }
-                    val invExpSum = (1.0 / max(1e-12, expSum)).toFloat()
-                    for (v in 0 until vocabNow) probs[v] *= invExpSum
-
-                    val targetProb = max(1e-7f, probs[targetId])
-                    epochLossSum += -ln(targetProb.toDouble())
-                    samples++
-                    totalSteps++
-                    trainedTokens++
-
-                    val b1Corr = 1f - pow(ADAM_BETA1, totalSteps)
-                    val b2Corr = 1f - pow(ADAM_BETA2, totalSteps)
-                    val stepLr = learningRate * sqrt(b2Corr) / max(1e-5f, b1Corr)
-
-                    // 2. Backpropagation
-                    dHidden.fill(0f)
-                    for (v in 0 until vocabNow) {
-                        val dLogit = (probs[v] - if (v == targetId) 1f else 0f).coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                        // Skip tiny zero-signal updates for non-target inactive vocab entries to keep speed high
-                        if (v != targetId && kotlin.math.abs(dLogit) < 0.0005f) continue
-
-                        // Accumulate dHidden from W2
-                        for (j in 0 until HIDDEN_DIM) {
-                            dHidden[j] += dLogit * w2[j][v]
-                        }
-
-                        // Adam update for b2[v]
-                        val mb2New = ADAM_BETA1 * mb2[v] + (1f - ADAM_BETA1) * dLogit
-                        val vb2New = ADAM_BETA2 * vb2[v] + (1f - ADAM_BETA2) * dLogit * dLogit
-                        mb2[v] = mb2New
-                        vb2[v] = vb2New
-                        b2[v] -= stepLr * mb2New / (sqrt(vb2New) + ADAM_EPS)
-
-                        // Adam update for W2[*][v]
-                        for (j in 0 until HIDDEN_DIM) {
-                            val g = (dLogit * hAct[j]).coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                            val mNew = ADAM_BETA1 * mW2[j][v] + (1f - ADAM_BETA1) * g
-                            val vNew = ADAM_BETA2 * vW2[j][v] + (1f - ADAM_BETA2) * g * g
-                            mW2[j][v] = mNew
-                            vW2[j][v] = vNew
-                            w2[j][v] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
-                        }
-                    }
-
-                    // Backprop through LeakyReLU + W1 + b1 -> dCtx
-                    dCtx.fill(0f)
-                    for (j in 0 until HIDDEN_DIM) {
-                        val actDeriv = if (hPre[j] >= 0f) 1f else 0.05f
-                        val dPre = (dHidden[j] * actDeriv).coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                        if (j < D_MODEL) dCtx[j] += dPre * 0.25f
-
-                        val mb1New = ADAM_BETA1 * mb1[j] + (1f - ADAM_BETA1) * dPre
-                        val vb1New = ADAM_BETA2 * vb1[j] + (1f - ADAM_BETA2) * dPre * dPre
-                        mb1[j] = mb1New
-                        vb1[j] = vb1New
-                        b1[j] -= stepLr * mb1New / (sqrt(vb1New) + ADAM_EPS)
-
-                        for (d in 0 until D_MODEL) {
-                            dCtx[d] += dPre * w1[d][j]
-                            val g = (dPre * ctxVec[d]).coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                            val mNew = ADAM_BETA1 * mW1[d][j] + (1f - ADAM_BETA1) * g
-                            val vNew = ADAM_BETA2 * vW1[d][j] + (1f - ADAM_BETA2) * g * g
-                            mW1[d][j] = mNew
-                            vW1[d][j] = vNew
-                            w1[d][j] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
-                        }
-                    }
-
-                    // Backprop into active context embeddings & positional weights
-                    for (k in 0 until ctxLen) {
-                        val tokId = ids[start + k]
-                        val slot = CONTEXT_WINDOW - ctxLen + k
-                        val pW = max(0.05f, posWeights[slot])
-                        val scale = pW * invNorm
-                        var posGrad = 0f
-
-                        val embRow = wEmb[tokId]
-                        val mRow = mEmb[tokId]
-                        val vRow = vEmb[tokId]
-                        for (d in 0 until D_MODEL) {
-                            posGrad += dCtx[d] * embRow[d] * invNorm
-                            val g = (dCtx[d] * scale).coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                            val mNew = ADAM_BETA1 * mRow[d] + (1f - ADAM_BETA1) * g
-                            val vNew = ADAM_BETA2 * vRow[d] + (1f - ADAM_BETA2) * g * g
-                            mRow[d] = mNew
-                            vRow[d] = vNew
-                            embRow[d] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
-                        }
-
-                        val gPos = posGrad.coerceIn(-GRAD_CLIP, GRAD_CLIP)
-                        mPos[slot] = ADAM_BETA1 * mPos[slot] + (1f - ADAM_BETA1) * gPos
-                        vPos[slot] = ADAM_BETA2 * vPos[slot] + (1f - ADAM_BETA2) * gPos * gPos
-                        posWeights[slot] = (posWeights[slot] - stepLr * mPos[slot] / (sqrt(vPos[slot]) + ADAM_EPS))
-                            .coerceIn(0.05f, 3.0f)
-                    }
-                }
-
-                totalEpochs++
-                val avgLoss = (epochLossSum / max(1, samples)).toFloat()
-                val ppl = exp(avgLoss.coerceAtMost(12f).toDouble()).toFloat()
-                lastLoss = avgLoss
-                if (avgLoss < bestLoss) bestLoss = avgLoss
-
-                TrainingEpochMetrics(
-                    epoch = totalEpochs,
-                    loss = avgLoss,
-                    perplexity = ppl,
-                    vocabSize = idToToken.size,
-                    parameterCount = computeParamCountLocked(),
-                    tokensProcessed = ids.size,
+                runSingleEpochLocked(
+                    ids = ids,
+                    learningRate = learningRate,
+                    residualScale = activeProfile.residualScale,
+                    mutateCounters = true,
                 )
             }
             if (metrics != null) {
@@ -330,6 +298,243 @@ class TrainableNeuralNet(
 
         mutex.withLock { saveToDiskLocked() }
         results
+    }
+
+    private fun runSingleEpochLocked(
+        ids: List<Int>,
+        learningRate: Float,
+        residualScale: Float,
+        mutateCounters: Boolean,
+    ): TrainingEpochMetrics {
+        var epochLossSum = 0.0
+        var samples = 0
+
+        val logits = FloatArray(idToToken.size)
+        val probs = FloatArray(idToToken.size)
+        val ctxVec = FloatArray(D_MODEL)
+        val hPre = FloatArray(HIDDEN_DIM)
+        val hAct = FloatArray(HIDDEN_DIM)
+        val dHidden = FloatArray(HIDDEN_DIM)
+        val dCtx = FloatArray(D_MODEL)
+        var localSteps = totalSteps
+
+        for (pos in 1 until ids.size) {
+            val targetId = ids[pos]
+            val start = max(0, pos - CONTEXT_WINDOW)
+            val ctxLen = pos - start
+            val vocabNow = idToToken.size
+
+            // 1. Forward: weighted positional context sum over embeddings
+            ctxVec.fill(0f)
+            var weightNorm = 0f
+            for (k in 0 until ctxLen) {
+                val tokId = ids[start + k]
+                val slot = CONTEXT_WINDOW - ctxLen + k
+                val pW = max(0.05f, posWeights[slot])
+                weightNorm += pW
+                val embRow = wEmb[tokId]
+                for (d in 0 until D_MODEL) {
+                    ctxVec[d] += embRow[d] * pW
+                }
+            }
+            val invNorm = 1f / max(1e-4f, weightNorm)
+            for (d in 0 until D_MODEL) ctxVec[d] *= invNorm
+
+            // Hidden layer: hPre = ctxVec * W1 + b1, LeakyReLU + residual on first D_MODEL dims
+            for (j in 0 until HIDDEN_DIM) {
+                var sum = b1[j]
+                for (d in 0 until D_MODEL) {
+                    sum += ctxVec[d] * w1[d][j]
+                }
+                if (j < D_MODEL) sum += ctxVec[j] * residualScale
+                hPre[j] = sum
+                hAct[j] = if (sum >= 0f) sum else 0.05f * sum
+            }
+
+            // Output logits: hAct * W2 + b2
+            var maxLogit = Float.NEGATIVE_INFINITY
+            for (v in 0 until vocabNow) {
+                var sum = b2[v]
+                for (j in 0 until HIDDEN_DIM) {
+                    sum += hAct[j] * w2[j][v]
+                }
+                logits[v] = sum
+                if (sum > maxLogit) maxLogit = sum
+            }
+
+            // Softmax + Cross-Entropy loss
+            var expSum = 0.0
+            for (v in 0 until vocabNow) {
+                val e = exp((logits[v] - maxLogit).coerceIn(-20f, 0f).toDouble())
+                probs[v] = e.toFloat()
+                expSum += e
+            }
+            val invExpSum = (1.0 / max(1e-12, expSum)).toFloat()
+            for (v in 0 until vocabNow) probs[v] *= invExpSum
+
+            val targetProb = max(1e-7f, probs[targetId])
+            epochLossSum += -ln(targetProb.toDouble())
+            samples++
+            localSteps++
+            if (mutateCounters) {
+                totalSteps++
+                trainedTokens++
+            }
+
+            val b1Corr = 1f - pow(ADAM_BETA1, localSteps)
+            val b2Corr = 1f - pow(ADAM_BETA2, localSteps)
+            val stepLr = learningRate * sqrt(b2Corr) / max(1e-5f, b1Corr)
+
+            // 2. Backpropagation
+            dHidden.fill(0f)
+            for (v in 0 until vocabNow) {
+                val dLogit = (probs[v] - if (v == targetId) 1f else 0f).coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                if (v != targetId && kotlin.math.abs(dLogit) < 0.0005f) continue
+
+                for (j in 0 until HIDDEN_DIM) {
+                    dHidden[j] += dLogit * w2[j][v]
+                }
+
+                val mb2New = ADAM_BETA1 * mb2[v] + (1f - ADAM_BETA1) * dLogit
+                val vb2New = ADAM_BETA2 * vb2[v] + (1f - ADAM_BETA2) * dLogit * dLogit
+                mb2[v] = mb2New
+                vb2[v] = vb2New
+                b2[v] -= stepLr * mb2New / (sqrt(vb2New) + ADAM_EPS)
+
+                for (j in 0 until HIDDEN_DIM) {
+                    val g = (dLogit * hAct[j]).coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                    val mNew = ADAM_BETA1 * mW2[j][v] + (1f - ADAM_BETA1) * g
+                    val vNew = ADAM_BETA2 * vW2[j][v] + (1f - ADAM_BETA2) * g * g
+                    mW2[j][v] = mNew
+                    vW2[j][v] = vNew
+                    w2[j][v] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
+                }
+            }
+
+            // Backprop through LeakyReLU + W1 + b1 -> dCtx
+            dCtx.fill(0f)
+            for (j in 0 until HIDDEN_DIM) {
+                val actDeriv = if (hPre[j] >= 0f) 1f else 0.05f
+                val dPre = (dHidden[j] * actDeriv).coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                if (j < D_MODEL) dCtx[j] += dPre * residualScale
+
+                val mb1New = ADAM_BETA1 * mb1[j] + (1f - ADAM_BETA1) * dPre
+                val vb1New = ADAM_BETA2 * vb1[j] + (1f - ADAM_BETA2) * dPre * dPre
+                mb1[j] = mb1New
+                vb1[j] = vb1New
+                b1[j] -= stepLr * mb1New / (sqrt(vb1New) + ADAM_EPS)
+
+                for (d in 0 until D_MODEL) {
+                    dCtx[d] += dPre * w1[d][j]
+                    val g = (dPre * ctxVec[d]).coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                    val mNew = ADAM_BETA1 * mW1[d][j] + (1f - ADAM_BETA1) * g
+                    val vNew = ADAM_BETA2 * vW1[d][j] + (1f - ADAM_BETA2) * g * g
+                    mW1[d][j] = mNew
+                    vW1[d][j] = vNew
+                    w1[d][j] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
+                }
+            }
+
+            // Backprop into active context embeddings & positional weights
+            for (k in 0 until ctxLen) {
+                val tokId = ids[start + k]
+                val slot = CONTEXT_WINDOW - ctxLen + k
+                val pW = max(0.05f, posWeights[slot])
+                val scale = pW * invNorm
+                var posGrad = 0f
+
+                val embRow = wEmb[tokId]
+                val mRow = mEmb[tokId]
+                val vRow = vEmb[tokId]
+                for (d in 0 until D_MODEL) {
+                    posGrad += dCtx[d] * embRow[d] * invNorm
+                    val g = (dCtx[d] * scale).coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                    val mNew = ADAM_BETA1 * mRow[d] + (1f - ADAM_BETA1) * g
+                    val vNew = ADAM_BETA2 * vRow[d] + (1f - ADAM_BETA2) * g * g
+                    mRow[d] = mNew
+                    vRow[d] = vNew
+                    embRow[d] -= stepLr * mNew / (sqrt(vNew) + ADAM_EPS)
+                }
+
+                val gPos = posGrad.coerceIn(-GRAD_CLIP, GRAD_CLIP)
+                mPos[slot] = ADAM_BETA1 * mPos[slot] + (1f - ADAM_BETA1) * gPos
+                vPos[slot] = ADAM_BETA2 * vPos[slot] + (1f - ADAM_BETA2) * gPos * gPos
+                posWeights[slot] = (posWeights[slot] - stepLr * mPos[slot] / (sqrt(vPos[slot]) + ADAM_EPS))
+                    .coerceIn(0.05f, 3.0f)
+            }
+        }
+
+        if (mutateCounters) totalEpochs++
+        val avgLoss = (epochLossSum / max(1, samples)).toFloat()
+        val ppl = exp(avgLoss.coerceAtMost(12f).toDouble()).toFloat()
+        if (mutateCounters) {
+            lastLoss = avgLoss
+            if (avgLoss < bestLoss) bestLoss = avgLoss
+        }
+
+        return TrainingEpochMetrics(
+            epoch = totalEpochs,
+            loss = avgLoss,
+            perplexity = ppl,
+            vocabSize = idToToken.size,
+            parameterCount = computeParamCountLocked(),
+            tokensProcessed = ids.size,
+        )
+    }
+
+    private fun evaluateLossLocked(ids: List<Int>, residualScale: Float): Float {
+        if (ids.size < 4) return 0f
+        var lossSum = 0.0
+        var samples = 0
+        val vocabNow = idToToken.size
+        val logits = FloatArray(vocabNow)
+        val probs = FloatArray(vocabNow)
+        val ctxVec = FloatArray(D_MODEL)
+        val hAct = FloatArray(HIDDEN_DIM)
+
+        for (pos in 1 until ids.size) {
+            val targetId = ids[pos].coerceIn(0, vocabNow - 1)
+            val start = max(0, pos - CONTEXT_WINDOW)
+            val ctxLen = pos - start
+            ctxVec.fill(0f)
+            var weightNorm = 0f
+            for (k in 0 until ctxLen) {
+                val tokId = ids[start + k].coerceIn(0, vocabNow - 1)
+                val slot = CONTEXT_WINDOW - ctxLen + k
+                val pW = max(0.05f, posWeights[slot])
+                weightNorm += pW
+                val embRow = wEmb[tokId]
+                for (d in 0 until D_MODEL) ctxVec[d] += embRow[d] * pW
+            }
+            val invNorm = 1f / max(1e-4f, weightNorm)
+            for (d in 0 until D_MODEL) ctxVec[d] *= invNorm
+
+            for (j in 0 until HIDDEN_DIM) {
+                var sum = b1[j]
+                for (d in 0 until D_MODEL) sum += ctxVec[d] * w1[d][j]
+                if (j < D_MODEL) sum += ctxVec[j] * residualScale
+                hAct[j] = if (sum >= 0f) sum else 0.05f * sum
+            }
+
+            var maxLogit = Float.NEGATIVE_INFINITY
+            for (v in 0 until vocabNow) {
+                var sum = b2[v]
+                for (j in 0 until HIDDEN_DIM) sum += hAct[j] * w2[j][v]
+                logits[v] = sum
+                if (sum > maxLogit) maxLogit = sum
+            }
+            var expSum = 0.0
+            for (v in 0 until vocabNow) {
+                val e = exp((logits[v] - maxLogit).coerceIn(-20f, 0f).toDouble())
+                probs[v] = e.toFloat()
+                expSum += e
+            }
+            val invExpSum = (1.0 / max(1e-12, expSum)).toFloat()
+            val targetProb = max(1e-7f, probs[targetId] * invExpSum)
+            lossSum += -ln(targetProb.toDouble())
+            samples++
+        }
+        return (lossSum / max(1, samples)).toFloat()
     }
 
     /**
@@ -377,7 +582,7 @@ class TrainableNeuralNet(
                 for (j in 0 until HIDDEN_DIM) {
                     var sum = b1[j]
                     for (d in 0 until D_MODEL) sum += ctxVec[d] * w1[d][j]
-                    if (j < D_MODEL) sum += ctxVec[j] * 0.25f
+                    if (j < D_MODEL) sum += ctxVec[j] * activeProfile.residualScale
                     hAct[j] = if (sum >= 0f) sum else 0.05f * sum
                 }
 
@@ -532,17 +737,77 @@ class TrainableNeuralNet(
         return (v * D_MODEL) + CONTEXT_WINDOW + (D_MODEL * HIDDEN_DIM) + HIDDEN_DIM + (HIDDEN_DIM * v) + v
     }
 
+    private class WeightSnapshot(
+        val vocabCount: Int,
+        val posWeights: FloatArray,
+        val w1: Array<FloatArray>,
+        val b1: FloatArray,
+        val wEmb: Array<FloatArray>,
+        val w2: Array<FloatArray>,
+        val b2: FloatArray,
+    )
+
+    private fun captureSnapshotLocked(): WeightSnapshot {
+        val v = idToToken.size
+        return WeightSnapshot(
+            vocabCount = v,
+            posWeights = posWeights.copyOf(),
+            w1 = Array(D_MODEL) { d -> w1[d].copyOf() },
+            b1 = b1.copyOf(),
+            wEmb = Array(v) { i -> wEmb[i].copyOf() },
+            w2 = Array(HIDDEN_DIM) { j -> w2[j].copyOf(v) },
+            b2 = b2.copyOf(v),
+        )
+    }
+
+    private fun restoreSnapshotLocked(s: WeightSnapshot) {
+        s.posWeights.copyInto(posWeights)
+        for (d in 0 until D_MODEL) s.w1[d].copyInto(w1[d])
+        s.b1.copyInto(b1)
+        for (i in 0 until s.vocabCount) {
+            s.wEmb[i].copyInto(wEmb[i])
+            b2[i] = s.b2[i]
+        }
+        for (j in 0 until HIDDEN_DIM) {
+            s.w2[j].copyInto(w2[j])
+        }
+        // Reset Adam moments for clean subsequent evaluation trials
+        mPos.fill(0f)
+        vPos.fill(0f)
+        mb1.fill(0f)
+        vb1.fill(0f)
+        for (d in 0 until D_MODEL) {
+            mW1[d].fill(0f)
+            vW1[d].fill(0f)
+        }
+        for (i in 0 until s.vocabCount) {
+            mEmb[i].fill(0f)
+            vEmb[i].fill(0f)
+            mb2[i] = 0f
+            vb2[i] = 0f
+        }
+        for (j in 0 until HIDDEN_DIM) {
+            mW2[j].fill(0f)
+            vW2[j].fill(0f)
+        }
+    }
+
     private fun saveToDiskLocked() {
         runCatching {
             weightsFile.parentFile?.mkdirs()
             val tmp = File(weightsFile.parentFile, "${weightsFile.name}.tmp")
             DataOutputStream(BufferedOutputStream(FileOutputStream(tmp))).use { out ->
-                out.writeInt(MAGIC)
+                out.writeInt(MAGIC_V2)
                 out.writeInt(totalEpochs)
                 out.writeLong(totalSteps)
                 out.writeLong(trainedTokens)
                 out.writeFloat(lastLoss)
                 out.writeFloat(bestLoss)
+
+                out.writeFloat(activeProfile.learningRate)
+                out.writeInt(activeProfile.defaultEpochs)
+                out.writeInt(activeProfile.ragTopK)
+                out.writeFloat(activeProfile.residualScale)
 
                 val v = idToToken.size
                 out.writeInt(v)
@@ -568,12 +833,22 @@ class TrainableNeuralNet(
         if (!weightsFile.exists()) return false
         return runCatching {
             DataInputStream(BufferedInputStream(FileInputStream(weightsFile))).use { inp ->
-                if (inp.readInt() != MAGIC) return false
+                val magic = inp.readInt()
+                if (magic != MAGIC_V1 && magic != MAGIC_V2) return false
                 totalEpochs = inp.readInt()
                 totalSteps = inp.readLong()
                 trainedTokens = inp.readLong()
                 lastLoss = inp.readFloat()
                 bestLoss = inp.readFloat()
+
+                if (magic == MAGIC_V2) {
+                    activeProfile = NeuralTrainingProfile(
+                        learningRate = inp.readFloat().coerceIn(0.002f, 0.06f),
+                        defaultEpochs = inp.readInt().coerceIn(1, 6),
+                        ragTopK = inp.readInt().coerceIn(2, 8),
+                        residualScale = inp.readFloat().coerceIn(0.05f, 0.6f),
+                    )
+                }
 
                 val v = inp.readInt().coerceIn(SPECIAL_TOKENS.size, MAX_VOCAB)
                 tokenToId.clear()

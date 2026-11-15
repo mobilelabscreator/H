@@ -51,8 +51,9 @@ class SourcesViewModel(
     val uiState: StateFlow<SourcesUiState> = _uiState.asStateFlow()
 
     fun addSource(type: SourceType, title: String, value: String) {
-        val cleanVal = value.trim()
-        if (cleanVal.isBlank()) return
+        val raw = value.trim()
+        if (raw.isBlank()) return
+        val cleanVal = if (type == SourceType.URL) WebContentReader.normalizeUrl(raw) else raw
         val cleanTitle = title.trim().ifBlank {
             if (type == SourceType.URL) cleanVal.removePrefix("https://").removePrefix("http://").take(42) else cleanVal.take(42)
         }
@@ -69,12 +70,14 @@ class SourcesViewModel(
     }
 
     fun updateSource(source: SourceEntity, type: SourceType, title: String, value: String) {
+        val raw = value.trim()
+        val cleanVal = if (type == SourceType.URL && raw.isNotBlank()) WebContentReader.normalizeUrl(raw) else raw
         viewModelScope.launch {
             sourceDao.update(
                 source.copy(
                     type = type.name,
-                    title = title.trim().ifBlank { value.trim().take(42) },
-                    value = value.trim(),
+                    title = title.trim().ifBlank { cleanVal.take(42) },
+                    value = cleanVal,
                 ),
             )
         }

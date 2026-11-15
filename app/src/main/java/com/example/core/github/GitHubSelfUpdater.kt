@@ -462,23 +462,36 @@ class GitHubSelfUpdater(
             }
         }
 
-        // 1. If TrainableNeuralNet.kt or SettingsRepository.kt is present and task mentions training/lr/vocab/accuracy, tune learning defaults safely
+        // 1. If TrainableNeuralNet.kt is present in the repo, commit the empirically measured optimal hyperparameters
+        val profile = nativeBrain.neuralNet.getTrainingProfile()
         val neuralPath = existingFiles.keys.firstOrNull { it.endsWith("TrainableNeuralNet.kt") }
-        if (neuralPath != null && (taskDescription.contains("train", true) || taskDescription.contains("neural", true) || taskDescription.contains("loss", true) || taskDescription.contains("upgrade", true))) {
+        if (neuralPath != null) {
             val original = existingFiles[neuralPath]?.first.orEmpty()
-            val tuned = when {
-                original.contains("learningRate: Float = 0.015f") && stats.lastLoss > 3.5f ->
-                    original.replace("learningRate: Float = 0.015f", "learningRate: Float = 0.018f")
-                original.contains("epochs: Int = 2,") && stats.totalEpochs > 0 ->
-                    original.replace("epochs: Int = 2,", "epochs: Int = 3,")
-                else -> original
+            var tuned = original
+                .replace(
+                    Regex("""val learningRate: Float = [0-9.]+f"""),
+                    "val learningRate: Float = ${"%.3f".format(profile.learningRate)}f",
+                )
+                .replace(
+                    Regex("""val defaultEpochs: Int = [0-9]+"""),
+                    "val defaultEpochs: Int = ${profile.defaultEpochs}",
+                )
+                .replace(
+                    Regex("""val residualScale: Float = [0-9.]+f"""),
+                    "val residualScale: Float = ${"%.2f".format(profile.residualScale)}f",
+                )
+            if (tuned == original && original.contains("learningRate: Float = 0.015f")) {
+                tuned = original.replace(
+                    "learningRate: Float = 0.015f",
+                    "learningRate: Float = ${"%.3f".format(profile.learningRate)}f",
+                )
             }
             if (tuned != original && isStructurallyValid(neuralPath, tuned)) {
                 edits.add(
                     GitHubFileEdit(
                         path = neuralPath,
                         content = tuned,
-                        message = "Tune neural training schedule based on epoch=${stats.totalEpochs}, loss=${"%.3f".format(stats.lastLoss)}",
+                        message = "Apply measured neural optimization (lr=${"%.3f".format(profile.learningRate)}, residual=${"%.2f".format(profile.residualScale)}, epoch=${stats.totalEpochs}, loss=${"%.3f".format(stats.lastLoss)})",
                     ),
                 )
             }
