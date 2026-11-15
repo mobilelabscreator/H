@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Agent Lab</string>
+    <string name="tab_chat">Chat</string>
+    <string name="tab_sources">Sources</string>
+    <string name="tab_knowledge">Knowledge</string>
+    <string name="tab_skills">Skills</string>
+    <string name="tab_agent">Agent</string>
+    <string name="tab_settings">Settings</string>
+</resources>

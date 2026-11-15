@@ -1,0 +1,6 @@
+{
+  "name": "Agent Lab",
+  "description": "Autonomous self-improving AI agent with local RAG knowledge base, QuickJS skill sandbox, and GitHub Actions self-update loop.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
